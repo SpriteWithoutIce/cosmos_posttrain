@@ -47,7 +47,7 @@ source export_env.sh
 - `COSMOS_PT_CKPT` — post-train checkpoint 路径（默认 `/home/jwhe/linyihan/cosmos/81edfebe-bd6a-4039-8c1d-737df1a790bf_ema_bf16.pt`）
 - `COSMOS_TOKENIZER` — VAE tokenizer 路径（默认 `/home/jwhe/linyihan/cosmos/tokenizer.pth`）
 - `COSMOS_MEAN_STD` — VAE mean/std 路径（需确认，存在则使用）
-- `DATASET_ROOT` — 数据集根目录（默认 `/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50`）
+- `DATASET_ROOT` — 数据集根目录（默认 `/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_test`）
 
 ### 3. 运行训练
 

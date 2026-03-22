@@ -14,6 +14,7 @@
 #   3. 使用预计算 latent 直通模型（不做 VAE encode）
 
 import os
+import time
 from pathlib import Path
 from collections import OrderedDict
 
@@ -33,11 +34,11 @@ from models.precomputed_latent import IdentityLatentTokenizer, PrecomputedLatent
 # =============================================================================
 LEROBOT_ROOT = os.environ.get(
     "LEROBOT_ROOT",
-    "/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50"
+    "/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_test"
 )
 LATENT_ROOT = os.environ.get(
     "LATENT_ROOT",
-    "/home/jwhe/linyihan/datasets/lerobot_latents"
+    "/home/jwhe/linyihan/datasets/lerobot_latents_test"
 )
 
 # ★ 你的 post-train checkpoint
@@ -127,6 +128,9 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         self._latent_cache = OrderedDict()
         self._parquet_cache_size = 16
         self._latent_cache_size = 16
+        self._debug_interval_sec = float(os.environ.get("LATENT_DATASET_DEBUG_INTERVAL", "0"))
+        self._last_debug_ts = time.time()
+        self._sample_counter = 0
 
     @property
     def episodes(self):
@@ -140,6 +144,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         episode_list = []
         for ep_idx, ep_info in self.meta.episodes.items():
             split = ep_info.get("split", "train")
+            # print(f"Episode {ep_idx}: split={split}, data_split={self.data_split}")
             if split != self.data_split and self.data_split != "all":
                 continue
             episode_list.append({"episode_index": ep_idx})
@@ -189,7 +194,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
             return latents, frame_ids, text_emb, task_text, n_latents
 
         task_name = self.lerobot_root.name
-        latent_file = self.latent_root / task_name / f"traj_{episode_index:06d}.pt"
+        latent_file = self.latent_root / task_name / f"traj_{episode_index:03d}.pt"
         if not latent_file.exists():
             raise FileNotFoundError(f"Missing latent file: {latent_file}")
 
@@ -209,7 +214,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
     def _get_n_latents_for_episode(self, episode_index: int) -> int:
         """从 .pt 文件获取指定 episode 的真实 latent 数量。"""
         task_name = self.lerobot_root.name
-        latent_file = self.latent_root / task_name / f"traj_{episode_index:06d}.pt"
+        latent_file = self.latent_root / task_name / f"traj_{episode_index:03d}.pt"
         if latent_file.exists():
             data = torch.load(latent_file, weights_only=False)
             return int(data["latent_num_frames"])
@@ -217,6 +222,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int):
         episode_index, pred_idx = self.sample_index[idx]
+        self._sample_counter += 1
 
         all_latents, frame_ids, text_emb, task_text, n_latents = self._load_latents_and_metadata(
             episode_index
@@ -272,6 +278,17 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
                 cond_frame_ids = torch.cat([actual_frame_ids, pad_frame_ids], dim=0)
             target_frame_ids = frame_ids_t[pred_idx:pred_idx + self.num_pred_frames]
             sample_frame_ids = torch.cat([cond_frame_ids, target_frame_ids], dim=0)
+
+        if self._debug_interval_sec > 0:
+            now = time.time()
+            if now - self._last_debug_ts >= self._debug_interval_sec:
+                print(
+                    f"[latent-dset] pid={os.getpid()} samples={self._sample_counter} "
+                    f"idx={idx} ep={episode_index} pred_idx={pred_idx} "
+                    f"latent_cache={len(self._latent_cache)} parquet_cache={len(self._parquet_cache)}",
+                    flush=True,
+                )
+                self._last_debug_ts = now
 
         return {
             "video": final_latents,              # 模型读 "video"
