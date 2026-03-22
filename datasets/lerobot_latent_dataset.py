@@ -160,6 +160,9 @@ class LeRobotLatentDataset(Dataset):
         all_latents, frame_ids, text_emb, task_text, n_latents = self._load_latents_and_metadata(
             episode_index
         )
+        frame_ids_t = None
+        if frame_ids is not None:
+            frame_ids_t = frame_ids if torch.is_tensor(frame_ids) else torch.as_tensor(frame_ids)
 
         # === 构建 4 个条件 latent ===
         if pred_idx >= self.num_cond_frames:
@@ -179,14 +182,35 @@ class LeRobotLatentDataset(Dataset):
         final_latents = torch.cat([cond_latents, target_latents], dim=0)
 
         # === 加载 64 个 action ===
-        frame_stride = frame_ids[1] - frame_ids[0] if frame_ids is not None and len(frame_ids) > 1 else 1
+        frame_stride = (
+            frame_ids_t[1] - frame_ids_t[0]
+            if frame_ids_t is not None and len(frame_ids_t) > 1
+            else 1
+        )
         num_actions = self.num_pred_frames * self.num_actions_per_latent * frame_stride
-        if frame_ids is not None:
-            action_start = int(frame_ids[pred_idx].item())
+        if frame_ids_t is not None:
+            action_start = int(frame_ids_t[pred_idx].item())
         else:
             action_start = pred_idx * self.time_division_factor
         action_end = action_start + num_actions
         actions, states = self._load_parquet(episode_index, action_start, action_end)
+
+        sample_frame_ids = None
+        if frame_ids_t is not None:
+            if pred_idx >= self.num_cond_frames:
+                cond_frame_ids = frame_ids_t[pred_idx - self.num_cond_frames:pred_idx]
+            else:
+                actual_frame_ids = frame_ids_t[0:pred_idx]
+                num_pad = self.num_cond_frames - actual_frame_ids.shape[0]
+                pad_src = (
+                    actual_frame_ids[-1:]
+                    if actual_frame_ids.shape[0] > 0
+                    else frame_ids_t[0:1]
+                )
+                pad_frame_ids = pad_src.repeat(num_pad)
+                cond_frame_ids = torch.cat([actual_frame_ids, pad_frame_ids], dim=0)
+            target_frame_ids = frame_ids_t[pred_idx:pred_idx + self.num_pred_frames]
+            sample_frame_ids = torch.cat([cond_frame_ids, target_frame_ids], dim=0)
 
         return {
             "video": final_latents,              # 模型读 "video"
@@ -196,7 +220,7 @@ class LeRobotLatentDataset(Dataset):
             "pred_idx": pred_idx,
             "t5_text_embeddings": text_emb,      # 模型读 "t5_text_embeddings"
             "ai_caption": task_text,             # 模型读 "ai_caption"
-            "frame_ids": frame_ids,
+            "frame_ids": sample_frame_ids,
         }
 
     def _get_n_latents_for_episode(self, episode_index: int) -> int:
