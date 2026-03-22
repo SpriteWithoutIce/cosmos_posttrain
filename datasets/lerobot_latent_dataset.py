@@ -47,7 +47,7 @@ class LeRobotLatentDataset(Dataset):
         time_division_factor: int = 4,
         num_cond_frames: int = 4,
         num_pred_frames: int = 8,
-        num_actions_per_latent: int = 8,
+        num_actions_per_latent: int = 4,
         *,
         obs_cam_keys: Sequence[str] | None = None,
         action_dim: int = 16,
@@ -179,7 +179,8 @@ class LeRobotLatentDataset(Dataset):
         final_latents = torch.cat([cond_latents, target_latents], dim=0)
 
         # === 加载 64 个 action ===
-        num_actions = self.num_pred_frames * self.num_actions_per_latent
+        frame_stride = frame_ids[1] - frame_ids[0] if frame_ids is not None and len(frame_ids) > 1 else 1
+        num_actions = self.num_pred_frames * self.num_actions_per_latent * frame_stride
         if frame_ids is not None:
             action_start = int(frame_ids[pred_idx].item())
         else:
@@ -231,7 +232,7 @@ class MultiLeRobotLatentDataset(torch.utils.data.Dataset):
         time_division_factor: int = 4,
         num_cond_frames: int = 4,
         num_pred_frames: int = 8,
-        num_actions_per_latent: int = 8,
+        num_actions_per_latent: int = 4,
         *,
         obs_cam_keys: Sequence[str] | None = None,
         action_dim: int = 16,
