@@ -24,6 +24,7 @@ from cosmos_predict2._src.predict2.configs.common.defaults.optimizer import regi
 from cosmos_predict2._src.predict2.configs.common.defaults.scheduler import register_scheduler
 from cosmos_predict2._src.predict2.configs.common.defaults.tokenizer import register_tokenizer
 from cosmos_predict2._src.predict2.configs.video2world.defaults.callbacks import register_callbacks
+from cosmos_predict2._src.predict2.configs.video2world.defaults.net import register_net as register_video_net
 
 
 @attrs.define(slots=False)
@@ -80,6 +81,7 @@ def make_config() -> Config:
     register_ckpt_type()
     register_training_and_val_data()
     register_net()
+    register_video_net()
     register_conditioner()
 
     # 官方 experiment 列表（必须导入以便 Hydra 解析 experiment=...）

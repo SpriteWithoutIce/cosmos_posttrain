@@ -8,8 +8,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/export_env.sh"
 
-# ★ 修复：添加 cosmos-predict2.5 到 PYTHONPATH
-export PYTHONPATH=/home/jwhe/linyihan/cosmos-predict2.5:$PYTHONPATH
+# ★ 添加 cosmos-predict2.5 到 PYTHONPATH（可通过 COSMOS_PREDICT2_ROOT 覆盖）
+export COSMOS_PREDICT2_ROOT="${COSMOS_PREDICT2_ROOT:-/home/jwhe/linyihan/cosmos-predict2.5-main}"
+export PYTHONPATH="${COSMOS_PREDICT2_ROOT}:$PYTHONPATH"
 # ── 参数配置 ────────────────────────────────────────────────────────────────
 CONFIG="${1:-configs/config.py}"
 NPROC="${NPROC:-1}"                          # GPU 数量，单卡用 1

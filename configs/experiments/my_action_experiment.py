@@ -11,24 +11,21 @@
 # 核心改动:
 #   1. 使用标准 Text2WorldModelRectifiedFlow，不加 action expert
 #   2. 自定义 Dataset：LeRobotLatentDataset，返回 latents + text_emb
-#   3. 跳过 VAE encode（IS_PREPROCESSED_KEY=True）
+#   3. 使用预计算 latent 直通模型（不做 VAE encode）
 
 import os
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 from hydra.core.config_store import ConfigStore
 from megatron.core import parallel_state
 from torch.utils.data import DataLoader, DistributedSampler
 
 from cosmos_predict2._src.imaginaire.lazy_config import LazyCall as L
 from cosmos_predict2._src.imaginaire.lazy_config import LazyDict
-from cosmos_predict2._src.predict2.models.text2world_model_rectified_flow import (
-    IS_PREPROCESSED_KEY,
-    Text2WorldModelRectifiedFlow,
-)
+from cosmos_predict2._src.predict2.models.video2world_model_rectified_flow import Video2WorldModelRectifiedFlowConfig
+from models.precomputed_latent import IdentityLatentTokenizer, PrecomputedLatentVideo2WorldModel
 
 # =============================================================================
 # 0. 全局配置
@@ -43,12 +40,15 @@ LATENT_ROOT = os.environ.get(
 )
 
 # ★ 你的 post-train checkpoint
-PT_CKPT = "/home/jwhe/linyihan/cosmos/81edfebe-bd6a-4039-8c1d-737df1a790bf_ema_bf16.pt"
+PT_CKPT = os.environ.get(
+    "COSMOS_PT_CKPT",
+    "/home/jwhe/linyihan/cosmos/81edfebe-bd6a-4039-8c1d-737df1a790bf_ema_bf16.pt"
+)
 
 ACTION_DIM = 16                     # 来自 info.json state 维度
 NUM_FRAMES = 45                     # 每次采样的 raw video 帧数
 NUM_LATENTS = 12                    # 每个 trajectory 的 latent 数量
-STATE_T = 1 + NUM_LATENTS // 4      # = 4，cosmos latent 帧数
+STATE_T = NUM_LATENTS               # 直接训练预计算 latent，时长应与输入 latent 帧数一致
 LATENT_STRIDE = 4                  # raw fps 50 → latent fps 12.5
 
 EXPERIMENT_NAME = "my_video_experiment"
@@ -202,6 +202,11 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         all_latents, frame_ids, text_emb, task_text, n_latents = self._load_latents_and_metadata(
             episode_index
         )
+        if text_emb is None:
+            raise ValueError(
+                f"Missing text_emb in latent file for episode {episode_index}. "
+                "This training setup requires precomputed text embeddings."
+            )
         frame_ids_t = None
         if frame_ids is not None:
             frame_ids_t = frame_ids if torch.is_tensor(frame_ids) else torch.as_tensor(frame_ids)
@@ -253,12 +258,13 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
             "video": final_latents,              # 模型读 "video"
             "actions": torch.from_numpy(actions).float(),
             "states": torch.from_numpy(states).float(),
-            IS_PREPROCESSED_KEY: True,
             "episode_index": episode_index,
             "pred_idx": pred_idx,
             "t5_text_embeddings": text_emb,      # 模型读 "t5_text_embeddings"
             "ai_caption": task_text,             # 模型读 "ai_caption"
             "frame_ids": sample_frame_ids,
+            "fps": torch.tensor(16, dtype=torch.int32),
+            "padding_mask": torch.zeros((1, final_latents.shape[-2], final_latents.shape[-1]), dtype=torch.float32),
         }
 
     def __len__(self):
@@ -325,11 +331,27 @@ class MultiLeRobotLatentDataset(torch.utils.data.Dataset):
 # 2. Experiment Config（注册 DataLoader）
 # =============================================================================
 
+PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
+    trainer=dict(
+        distributed_parallelism="fsdp",
+    ),
+    model=L(PrecomputedLatentVideo2WorldModel)(
+        config=Video2WorldModelRectifiedFlowConfig(
+            fsdp_shard_size=8,
+            state_t=STATE_T,
+            text_encoder_config=None,  # 使用预计算 text_emb，不在线加载 reason1
+            tokenizer=L(IdentityLatentTokenizer)(latent_ch=16, spatial_compression_factor=8),
+        ),
+        _recursive_=False,
+    ),
+)
+
+
 my_video_experiment = LazyDict(
     dict(
         defaults=[
             "/experiment/Stage-c_pt_4-reason_embeddings-v1p1-Index-26-Size-2B-Res-720-Fps-16-Note-T2V_high_sigma_loss_reweighted_1_1_rectified_flow_only",
-            {"override /model": "video2world_fsdp_rectified_flow"},
+            {"override /model": "precomputed_latent_video2world_fsdp_rectified_flow"},
             {"override /net": "cosmos_v1_2B"},
             {"override /conditioner": "video_prediction_conditioner"},
             {"override /data_train": "lerobot_eef_50_train"},
@@ -390,6 +412,7 @@ my_video_experiment = LazyDict(
                 max_num_conditional_frames=4,
                 conditional_frames_probs=None,
                 state_t=STATE_T,
+                text_encoder_config=None,
             ),
         ),
 
@@ -480,6 +503,14 @@ def register_lerobot_eef_data():
 # 4. Hydra 注册
 # =============================================================================
 cs = ConfigStore.instance()
+
+# 注册预计算 latent 专用模型
+cs.store(
+    group="model",
+    package="_global_",
+    name="precomputed_latent_video2world_fsdp_rectified_flow",
+    node=PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG,
+)
 
 # 注册 Experiment
 cs.store(
