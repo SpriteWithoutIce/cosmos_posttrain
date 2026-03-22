@@ -14,6 +14,7 @@
 #   3. 使用预计算 latent 直通模型（不做 VAE encode）
 
 import os
+import time
 from pathlib import Path
 from collections import OrderedDict
 
@@ -127,6 +128,9 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         self._latent_cache = OrderedDict()
         self._parquet_cache_size = 16
         self._latent_cache_size = 16
+        self._debug_interval_sec = float(os.environ.get("LATENT_DATASET_DEBUG_INTERVAL", "0"))
+        self._last_debug_ts = time.time()
+        self._sample_counter = 0
 
     @property
     def episodes(self):
@@ -217,6 +221,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int):
         episode_index, pred_idx = self.sample_index[idx]
+        self._sample_counter += 1
 
         all_latents, frame_ids, text_emb, task_text, n_latents = self._load_latents_and_metadata(
             episode_index
@@ -272,6 +277,17 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
                 cond_frame_ids = torch.cat([actual_frame_ids, pad_frame_ids], dim=0)
             target_frame_ids = frame_ids_t[pred_idx:pred_idx + self.num_pred_frames]
             sample_frame_ids = torch.cat([cond_frame_ids, target_frame_ids], dim=0)
+
+        if self._debug_interval_sec > 0:
+            now = time.time()
+            if now - self._last_debug_ts >= self._debug_interval_sec:
+                print(
+                    f"[latent-dset] pid={os.getpid()} samples={self._sample_counter} "
+                    f"idx={idx} ep={episode_index} pred_idx={pred_idx} "
+                    f"latent_cache={len(self._latent_cache)} parquet_cache={len(self._parquet_cache)}",
+                    flush=True,
+                )
+                self._last_debug_ts = now
 
         return {
             "video": final_latents,              # 模型读 "video"
