@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "robot-posttrain"
+version = "0.1.0"
+description = "Post-training wrapper for Cosmos-Predict2.5 + custom action expert"
+requires-python = ">=3.10"
+dependencies = [
+  "cosmos-oss[cu128] @ file:///home/jwhe/linyihan/cosmos-predict2.5/packages/cosmos-oss",
+  "lerobot>=0.3.0",
+  "easydict>=1.10",
+  "pyarrow>=19.0.0",
+  "pandas>=2.0.0",
+  "tqdm>=4.67.0",
+  "scipy>=1.15.0",
+  "einops>=0.8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
