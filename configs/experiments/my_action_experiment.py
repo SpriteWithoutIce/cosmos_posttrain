@@ -327,6 +327,18 @@ class MultiLeRobotLatentDataset(torch.utils.data.Dataset):
         return self.datasets[dset_idx][local_idx]
 
 
+class CompatibleDataLoader(DataLoader):
+    """
+    Some inherited Cosmos configs inject fields for mixed-dataloader training
+    (e.g. `dataloaders`, `ratio`) into `dataloader_train`.
+    This wrapper ignores those extra fields and builds a normal PyTorch DataLoader.
+    """
+
+    def __init__(self, *args, dataloaders=None, ratio=None, **kwargs):
+        del dataloaders, ratio
+        super().__init__(*args, **kwargs)
+
+
 # =============================================================================
 # 2. Experiment Config（注册 DataLoader）
 # =============================================================================
@@ -447,7 +459,7 @@ _lerobot_val_dataset = L(MultiLeRobotLatentDataset)(
     data_split="test",
 )
 
-lerobot_eef_50_train_dataloader = L(DataLoader)(
+lerobot_eef_50_train_dataloader = L(CompatibleDataLoader)(
     dataset=_lerobot_train_dataset,
     sampler=L(_get_sampler)(dataset=_lerobot_train_dataset),
     batch_size=1,
@@ -456,7 +468,7 @@ lerobot_eef_50_train_dataloader = L(DataLoader)(
     pin_memory=True,
 )
 
-lerobot_eef_50_val_dataloader = L(DataLoader)(
+lerobot_eef_50_val_dataloader = L(CompatibleDataLoader)(
     dataset=_lerobot_val_dataset,
     sampler=L(_get_sampler)(dataset=_lerobot_val_dataset),
     batch_size=1,
