@@ -416,23 +416,6 @@ my_video_experiment = LazyDict(
             ),
         ),
 
-        dataloader_train=dict(
-            batch_size=1,
-            sampler=dict(
-                dataset=dict(
-                    gripper_rescale_factor=1,
-                    num_action_per_chunk=NUM_LATENTS,
-                    fps_downsample_ratio=LATENT_STRIDE,
-                    video_size=[432, 768],
-                ),
-            ),
-            dataset=dict(
-                gripper_rescale_factor=1,
-                num_action_per_chunk=NUM_LATENTS,
-                fps_downsample_ratio=LATENT_STRIDE,
-                video_size=[432, 768],
-            ),
-        ),
     ),
     flags={"allow_objects": True},
 )
