@@ -74,9 +74,8 @@ class LeRobotLatentDataset(Dataset):
             self.lerobot_root, self.lerobot_root, revision="v2.1", force_cache_sync=False
         )
         self.episode_data_index = get_episode_data_index(
-            self.meta.episodes, self.episodes
+            self.meta.episodes, self.meta.episodes
         )
-
         self.episodes = self._parse_episodes()
         self._build_sample_index()  # 预计算扁平化索引表
 
@@ -115,8 +114,8 @@ class LeRobotLatentDataset(Dataset):
         for ep in self.episodes:
             ep_idx = ep["episode_index"]
             n_latents = self._get_n_latents_for_episode(ep_idx)
-            n_samples = max(0, n_latents - 8)  # pred_idx from 1 to n-8
-            for pred_idx in range(1, n_latents - 8 + 1):
+            n_samples = max(0, n_latents - self.num_pred_frames)  # pred_idx from 1 to n-8
+            for pred_idx in range(1, n_latents - self.num_pred_frames + 1):
                 self.sample_index.append((ep_idx, pred_idx))
             self.episode_cumsum.append(self.episode_cumsum[-1] + n_samples)
 
@@ -166,11 +165,12 @@ class LeRobotLatentDataset(Dataset):
         if pred_idx >= self.num_cond_frames:
             cond_latents = all_latents[pred_idx - self.num_cond_frames:pred_idx]
         else:
-            num_actual = pred_idx
-            num_pad = self.num_cond_frames - num_actual
-            pad_latents = all_latents[0:1].repeat(num_pad, 1, 1, 1)
-            actual_latents = all_latents[0:num_actual] if num_actual > 0 else torch.zeros(0, *all_latents.shape[1:])
-            cond_latents = torch.cat([pad_latents, actual_latents], dim=0)
+            actual_latents = all_latents[0:pred_idx]  # 例如 pred_idx=2 -> [0,1]
+            num_pad = self.num_cond_frames - actual_latents.shape[0]
+            pad_src = actual_latents[-1:] if actual_latents.shape[0] > 0 else all_latents[0:1]
+            pad_latents = pad_src.repeat(num_pad, 1, 1, 1)
+            # 不足4帧时，用“已有前置里的最后一个”补齐: 1->0000, 2->0111
+            cond_latents = torch.cat([actual_latents, pad_latents], dim=0)
 
         # === 构建 8 个预测 latent ===
         target_latents = all_latents[pred_idx:pred_idx + self.num_pred_frames]
