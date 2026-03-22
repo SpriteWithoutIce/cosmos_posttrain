@@ -15,6 +15,7 @@
 
 import os
 from pathlib import Path
+from collections import OrderedDict
 
 import numpy as np
 import torch
@@ -121,6 +122,11 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
 
         self.episodes = self._parse_episodes()
         self._build_sample_index()
+        # Lightweight LRU caches to avoid repeatedly parsing the same files.
+        self._parquet_cache = OrderedDict()
+        self._latent_cache = OrderedDict()
+        self._parquet_cache_size = 16
+        self._latent_cache_size = 16
 
     @property
     def episodes(self):
@@ -154,38 +160,51 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         """从 parquet 加载 action / state。"""
         import pandas as pd
 
-        chunk = self.meta.get_episode_chunk(episode_index)
-        parquet_path = (
-            self.lerobot_root
-            / f"data/chunk-{chunk:03d}"
-            / f"episode_{episode_index:06d}.parquet"
-        )
-        df = pd.read_parquet(parquet_path)
-        row = df.iloc[start:end]
-        actions = row["action"].values.astype(np.float32)
-        states = row["observation.state"].values.astype(np.float32)
+        if episode_index in self._parquet_cache:
+            self._parquet_cache.move_to_end(episode_index)
+            actions_all, states_all = self._parquet_cache[episode_index]
+        else:
+            chunk = self.meta.get_episode_chunk(episode_index)
+            parquet_path = (
+                self.lerobot_root
+                / f"data/chunk-{chunk:03d}"
+                / f"episode_{episode_index:06d}.parquet"
+            )
+            df = pd.read_parquet(parquet_path, columns=["action", "observation.state"])
+            actions_all = np.stack(df["action"].to_numpy()).astype(np.float32, copy=False)
+            states_all = np.stack(df["observation.state"].to_numpy()).astype(np.float32, copy=False)
+            self._parquet_cache[episode_index] = (actions_all, states_all)
+            if len(self._parquet_cache) > self._parquet_cache_size:
+                self._parquet_cache.popitem(last=False)
+
+        actions = actions_all[start:end]
+        states = states_all[start:end]
         return actions, states
 
     def _load_latents_and_metadata(self, episode_index: int):
         """从 .pt 文件加载完整的 trajectory latent 和元数据。"""
+        if episode_index in self._latent_cache:
+            self._latent_cache.move_to_end(episode_index)
+            latents, frame_ids, text_emb, task_text, n_latents = self._latent_cache[episode_index]
+            return latents, frame_ids, text_emb, task_text, n_latents
+
         task_name = self.lerobot_root.name
         latent_file = self.latent_root / task_name / f"traj_{episode_index:06d}.pt"
+        if not latent_file.exists():
+            raise FileNotFoundError(f"Missing latent file: {latent_file}")
 
-        if latent_file.exists():
-            data = torch.load(latent_file, weights_only=False)
-            latents = data["latent"]
-            n_latents = int(data["latent_num_frames"])
-            frame_ids = data["frame_ids"]
-            text_emb = data.get("text_emb", None)
-            task_text = data.get("task_text", "")
-        else:
-            latents = torch.zeros(12, 16, 60, 80)
-            n_latents = 12
-            frame_ids = None
-            text_emb = None
-            task_text = ""
+        data = torch.load(latent_file, weights_only=False)
+        latents = data["latent"].float()
+        n_latents = int(data["latent_num_frames"])
+        frame_ids = data["frame_ids"]
+        text_emb = data.get("text_emb", None)
+        task_text = data.get("task_text", "")
 
-        return latents.float(), frame_ids, text_emb, task_text, n_latents
+        self._latent_cache[episode_index] = (latents, frame_ids, text_emb, task_text, n_latents)
+        if len(self._latent_cache) > self._latent_cache_size:
+            self._latent_cache.popitem(last=False)
+
+        return latents, frame_ids, text_emb, task_text, n_latents
 
     def _get_n_latents_for_episode(self, episode_index: int) -> int:
         """从 .pt 文件获取指定 episode 的真实 latent 数量。"""
