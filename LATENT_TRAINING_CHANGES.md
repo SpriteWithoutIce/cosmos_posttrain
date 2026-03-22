@@ -32,7 +32,7 @@ No files under `cosmos-predict2.5-main` were modified.
 - `export_env.sh`
   - Added:
     - `LEROBOT_ROOT` (defaults to `DATASET_ROOT`)
-    - `LATENT_ROOT` (defaults to `/home/jwhe/linyihan/datasets/lerobot_latents`)
+    - `LATENT_ROOT` (defaults to `/home/jwhe/linyihan/datasets/lerobot_latents_test`)
 - `train.sh`
   - `PYTHONPATH` now uses configurable `COSMOS_PREDICT2_ROOT`.
   - Default path: `/home/jwhe/linyihan/cosmos-predict2.5-main`.

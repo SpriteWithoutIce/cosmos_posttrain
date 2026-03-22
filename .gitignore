@@ -1,0 +1,7 @@
+/logs
+swanlog/
+checkpoints/
+*.pyc
+__pycache__/
+*.pkl
+video_generation/

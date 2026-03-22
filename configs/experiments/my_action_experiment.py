@@ -34,11 +34,11 @@ from models.precomputed_latent import IdentityLatentTokenizer, PrecomputedLatent
 # =============================================================================
 LEROBOT_ROOT = os.environ.get(
     "LEROBOT_ROOT",
-    "/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50"
+    "/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_test"
 )
 LATENT_ROOT = os.environ.get(
     "LATENT_ROOT",
-    "/home/jwhe/linyihan/datasets/lerobot_latents"
+    "/home/jwhe/linyihan/datasets/lerobot_latents_test"
 )
 
 # ★ 你的 post-train checkpoint
@@ -144,6 +144,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         episode_list = []
         for ep_idx, ep_info in self.meta.episodes.items():
             split = ep_info.get("split", "train")
+            # print(f"Episode {ep_idx}: split={split}, data_split={self.data_split}")
             if split != self.data_split and self.data_split != "all":
                 continue
             episode_list.append({"episode_index": ep_idx})
@@ -193,7 +194,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
             return latents, frame_ids, text_emb, task_text, n_latents
 
         task_name = self.lerobot_root.name
-        latent_file = self.latent_root / task_name / f"traj_{episode_index:06d}.pt"
+        latent_file = self.latent_root / task_name / f"traj_{episode_index:03d}.pt"
         if not latent_file.exists():
             raise FileNotFoundError(f"Missing latent file: {latent_file}")
 
@@ -213,7 +214,7 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
     def _get_n_latents_for_episode(self, episode_index: int) -> int:
         """从 .pt 文件获取指定 episode 的真实 latent 数量。"""
         task_name = self.lerobot_root.name
-        latent_file = self.latent_root / task_name / f"traj_{episode_index:06d}.pt"
+        latent_file = self.latent_root / task_name / f"traj_{episode_index:03d}.pt"
         if latent_file.exists():
             data = torch.load(latent_file, weights_only=False)
             return int(data["latent_num_frames"])
@@ -499,7 +500,7 @@ lerobot_eef_50_train_dataloader = L(CompatibleDataLoader)(
     sampler=L(_get_sampler)(dataset=_lerobot_train_dataset),
     batch_size=1,
     drop_last=True,
-    num_workers=4,
+    num_workers=0,
     pin_memory=True,
 )
 
@@ -508,7 +509,7 @@ lerobot_eef_50_val_dataloader = L(CompatibleDataLoader)(
     sampler=L(_get_sampler)(dataset=_lerobot_val_dataset),
     batch_size=1,
     drop_last=True,
-    num_workers=4,
+    num_workers=0,
     pin_memory=True,
 )
 

@@ -19,9 +19,9 @@ export COSMOS_TOKENIZER="${COSMOS_TOKENIZER:-/home/jwhe/linyihan/cosmos/tokenize
 # fi
 
 # ── 数据集 ──────────────────────────────────────────────────────────────────
-export DATASET_ROOT="${DATASET_ROOT:-/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50}"
+export DATASET_ROOT="${DATASET_ROOT:-/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_test}"
 export LEROBOT_ROOT="${LEROBOT_ROOT:-${DATASET_ROOT}}"
-export LATENT_ROOT="${LATENT_ROOT:-/home/jwhe/linyihan/datasets/lerobot_latents}"
+export LATENT_ROOT="${LATENT_ROOT:-/home/jwhe/linyihan/datasets/lerobot_latents_test}"
 
 # ── 训练输出根目录 ────────────────────────────────────────────────────────────
 export IMAGINAIRE_OUTPUT_ROOT="${IMAGINAIRE_OUTPUT_ROOT:-/tmp/imaginaire4-output}"
