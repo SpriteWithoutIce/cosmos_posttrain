@@ -3,7 +3,7 @@
 # 训练启动脚本
 # =============================================================================
 set -e
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=2,3
 # 加载环境变量
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/export_env.sh"
@@ -35,4 +35,4 @@ torchrun \
     checkpoint.save_iter=10000 \
     job.wandb_mode=${JOB_WANDB_MODE} \
     job.name=${EXP_NAME}_$(date +%Y%m%d_%H%M%S) \
-    > logs/train_${EXP_NAME}_$(date +%Y%m%d_%H%M%S).log 2>&1
+    # > logs/train_${EXP_NAME}_$(date +%Y%m%d_%H%M%S).log 2>&1

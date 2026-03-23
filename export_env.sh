@@ -48,7 +48,7 @@ export JOB_WANDB_MODE="${JOB_WANDB_MODE:-$WANDB_MODE}"
 # ── Action Head 训练配置 ─────────────────────────────────────────────────────
 export ACTION_HEAD_ENABLED="${ACTION_HEAD_ENABLED:-1}"
 export ACTION_HEAD_LOSS_WEIGHT="${ACTION_HEAD_LOSS_WEIGHT:-1.0}"
-export ACTION_HEAD_SAVE_EVERY="${ACTION_HEAD_SAVE_EVERY:-500}"
+export ACTION_HEAD_SAVE_EVERY="${ACTION_HEAD_SAVE_EVERY:-1000}"
 export ACTION_HEAD_SAVE_DIR="${ACTION_HEAD_SAVE_DIR:-/home/jwhe/linyihan/robot_posttrain/action_head_ckpt}"
 # 可选：加载已有 action head 参数（仅 head，不影响 video ckpt）
 export ACTION_HEAD_LOAD_PATH="${ACTION_HEAD_LOAD_PATH:-}"
