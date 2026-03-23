@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Beta
 from torch import Tensor
+from einops import rearrange
 
 from cosmos_predict2._src.imaginaire.lazy_config import LazyDict
 from cosmos_predict2._src.imaginaire.utils.optim_instantiate import get_base_scheduler
@@ -266,15 +267,14 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             raise KeyError(
                 "Cannot find predicted velocity tensor in output_batch['model_pred']."
             )
-        # v_pred: [B, C, T, H, W] -> [B, T, C] via global spatial pooling.
-        v_seq = v_pred.mean(dim=(-1, -2)).transpose(1, 2).contiguous()
-        t_total = v_seq.shape[1]
+        # v_pred: [B, C, T, H, W]
+        t_total = v_pred.shape[2]
         if num_cond + num_pred > t_total:
             raise ValueError(f"Invalid cond/pred split: cond={num_cond}, pred={num_pred}, total={t_total}")
-
-        pred_v = v_seq[:, num_cond : num_cond + num_pred, :]
-        prev_v = v_seq[:, num_cond - 1 : num_cond + num_pred - 1, :]
-        return pred_v - prev_v
+        pred_v = v_pred[:, :, num_cond : num_cond + num_pred, :, :]
+        prev_v = v_pred[:, :, num_cond - 1 : num_cond + num_pred - 1, :, :]
+        delta_v = pred_v - prev_v  # [B, C, 8, H, W]
+        return rearrange(delta_v, "b c t h w -> b t c h w").contiguous()
 
     def _compute_delta_v_at_fixed_video_t(self, output_batch: dict, num_cond: int, num_pred: int) -> Tensor:
         """
@@ -305,10 +305,10 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             condition=condition,
         )
 
-        v_seq = v_pred_fix.mean(dim=(-1, -2)).transpose(1, 2).contiguous()  # [B,T,C]
-        pred_v = v_seq[:, num_cond : num_cond + num_pred, :]
-        prev_v = v_seq[:, num_cond - 1 : num_cond + num_pred - 1, :]
-        return pred_v - prev_v
+        pred_v = v_pred_fix[:, :, num_cond : num_cond + num_pred, :, :]
+        prev_v = v_pred_fix[:, :, num_cond - 1 : num_cond + num_pred - 1, :, :]
+        delta_v = pred_v - prev_v  # [B, C, 8, H, W]
+        return rearrange(delta_v, "b c t h w -> b t c h w").contiguous()
 
     def _sample_action_head_timestep(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         buckets = int(getattr(self.action_head, "timestep_buckets", 1000))

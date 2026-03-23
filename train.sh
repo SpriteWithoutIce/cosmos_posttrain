@@ -39,6 +39,7 @@ torchrun \
     checkpoint.load_training_state=${CHECKPOINT_LOAD_TRAINING_STATE} \
     checkpoint.strict_resume=${CHECKPOINT_STRICT_RESUME} \
     trainer.max_iter=${MAX_ITERS} \
+    trainer.grad_accum_iter=${GRAD_ACCUM_ITER} \
     trainer.logging_iter=50 \
     trainer.validation_iter=5000 \
     trainer.grad_accum_iter=${GRAD_ACCUM_ITER} \

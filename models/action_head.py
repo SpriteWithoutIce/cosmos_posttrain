@@ -189,12 +189,16 @@ class ActionMIPHead(nn.Module):
         sigma_k: float = 4.0,
         dropout: float = 0.0,
         timestep_buckets: int = 1000,
+        delta_spatial_pool_h: int = 0,
+        delta_spatial_pool_w: int = 0,
     ):
         super().__init__()
         self.action_dim = action_dim
         self.num_actions = num_actions
         self.sigma_k = sigma_k
         self.timestep_buckets = timestep_buckets
+        self.delta_spatial_pool_h = int(delta_spatial_pool_h)
+        self.delta_spatial_pool_w = int(delta_spatial_pool_w)
         hidden_mlp = max(128, d_model // 2)
         self.action_encoder = MultiEmbodimentActionEncoder(action_dim=action_dim, hidden_size=d_model, num_embodiments=1)
         self.state_encoder = CategorySpecificMLP(
@@ -227,6 +231,31 @@ class ActionMIPHead(nn.Module):
         # delta small -> sigma large; delta large -> sigma small
         delta_mag = torch.norm(delta_tokens, dim=-1, keepdim=True)
         return torch.exp(-self.sigma_k * delta_mag)
+
+    def _prepare_delta_tokens(self, delta_v: torch.Tensor) -> torch.Tensor:
+        """
+        Support both:
+          - [B, 8, C]
+          - [B, 8, C, H, W]  (spatially rich delta-v tokens)
+        Return: [B, L, D]
+        """
+        if delta_v.ndim == 3:
+            repeat_factor = self.num_actions // delta_v.shape[1]
+            tokens = delta_v.repeat_interleave(repeat_factor, dim=1)
+            return self.delta_proj(tokens)
+        if delta_v.ndim == 5:
+            # [B, T, C, H, W]
+            bsz, t, c, h, w = delta_v.shape
+            x = delta_v
+            # Optional spatial pooling to control token count when needed.
+            if self.delta_spatial_pool_h > 0 and self.delta_spatial_pool_w > 0:
+                x = x.reshape(bsz * t, c, h, w)
+                x = torch.nn.functional.adaptive_avg_pool2d(x, (self.delta_spatial_pool_h, self.delta_spatial_pool_w))
+                h, w = self.delta_spatial_pool_h, self.delta_spatial_pool_w
+                x = x.reshape(bsz, t, c, h, w)
+            x = x.permute(0, 1, 3, 4, 2).reshape(bsz, t * h * w, c).contiguous()
+            return self.delta_proj(x)
+        raise ValueError(f"Unsupported delta_v shape: {tuple(delta_v.shape)}")
 
     def _build_temb(self, timestep: torch.Tensor | None, batch_size: int, device: torch.device) -> torch.Tensor:
         if timestep is None:
@@ -264,8 +293,7 @@ class ActionMIPHead(nn.Module):
         x = x + self.pos_embedding(pos_ids).unsqueeze(0)
         temb = self._build_temb(timestep, batch_size=bsz, device=x.device)
 
-        repeat_factor = self.num_actions // delta_v.shape[1]
-        delta_tokens = self.delta_proj(delta_v.repeat_interleave(repeat_factor, dim=1))
+        delta_tokens = self._prepare_delta_tokens(delta_v)
         state_tokens = self.state_encoder(state_vec.unsqueeze(1), cat_ids)
         state_tokens = state_tokens + self.state_proj(state_vec).unsqueeze(1)
         sigma = self._compute_sigma(delta_tokens)

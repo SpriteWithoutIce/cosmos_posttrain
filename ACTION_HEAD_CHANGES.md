@@ -81,6 +81,14 @@
 - 训练时使用 `output_batch["timesteps"]` 作为 action head 的 timestep 条件。
   （已进一步改为可独立采样，见第 8 条）
 
+10. delta_v 保留空间高维（不再全局均值）
+- 之前：`model_pred` 在 `H,W` 上做 `mean` 后得到 `[B,8,16]`。
+- 现在：直接在 latent 空间算差分，得到 `[B,8,C,H,W]`，并展开为空间 token 做 cross-attn。
+- 可选池化开关（防显存压力）：
+  - `ACTION_HEAD_DELTA_POOL_H`
+  - `ACTION_HEAD_DELTA_POOL_W`
+  - 默认 `0` 表示不池化、完整保留空间分辨率。
+
 8. 双时间步机制（按你的新需求）
 - video 主分支：继续使用原始随机 RF 时间步训练 video loss。
 - action 的 `delta_v` 分支：支持固定视频采样时间步 `ACTION_DELTA_VIDEO_T`（例如 0.5）：
@@ -118,6 +126,8 @@
 - `ACTION_HEAD_NOISE_BETA_ALPHA`
 - `ACTION_HEAD_NOISE_BETA_BETA`
 - `ACTION_HEAD_NOISE_BETA_S`
+- `ACTION_HEAD_DELTA_POOL_H`
+- `ACTION_HEAD_DELTA_POOL_W`
 - `ACTION_STATE_USE_QNORM`
 - `ACTION_STATE_NORM_CLIP`
 - `ACTION_STATE_GLOBAL_STATS_JSON`
