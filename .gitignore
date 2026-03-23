@@ -5,3 +5,4 @@ checkpoints/
 __pycache__/
 *.pkl
 video_generation/
+open_loop/

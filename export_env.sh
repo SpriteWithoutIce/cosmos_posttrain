@@ -24,7 +24,7 @@ export LEROBOT_ROOT="${LEROBOT_ROOT:-${DATASET_ROOT}}"
 export LATENT_ROOT="${LATENT_ROOT:-/home/jwhe/linyihan/datasets/lerobot_latents_test}"
 
 # ── 训练输出根目录 ────────────────────────────────────────────────────────────
-export IMAGINAIRE_OUTPUT_ROOT="${IMAGINAIRE_OUTPUT_ROOT:-/tmp/imaginaire4-output}"
+export IMAGINAIRE_OUTPUT_ROOT="${IMAGINAIRE_OUTPUT_ROOT:-/home/jwhe/linyihan/robot_posttrain/open_loop}"
 
 # ── HuggingFace Token（如需下载受限 ckpt）────────────────────────────────────
 # export HF_TOKEN="your_hf_token_here"
@@ -41,5 +41,6 @@ export TOKENIZERS_PARALLELISM=false
 export COSMOS_INTERNAL=0
 export CUDA_MODULE_LOADING=LAZY
 
-# 禁用 wandb / S3（调试阶段建议）
-export WANDB_MODE=disabled
+# wandb 模式（disabled / offline / online）
+export WANDB_MODE="${WANDB_MODE:-disabled}"
+export JOB_WANDB_MODE="${JOB_WANDB_MODE:-$WANDB_MODE}"
