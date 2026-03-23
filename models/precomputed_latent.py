@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from torch.distributions import Beta
 from torch import Tensor
 
+from cosmos_predict2._src.imaginaire.lazy_config import LazyDict
+from cosmos_predict2._src.imaginaire.utils.optim_instantiate import get_base_scheduler
 from cosmos_predict2._src.predict2.conditioner import DataType
 from cosmos_predict2._src.predict2.configs.video2world.defaults.conditioner import Video2WorldCondition
 from cosmos_predict2._src.predict2.models.video2world_model_rectified_flow import (
@@ -80,6 +82,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         *args,
         action_head_enabled: bool = False,
         action_head_cfg: dict | None = None,
+        action_head_lr: float = 1e-4,
         action_loss_weight: float = 1.0,
         action_delta_video_t: float = 0.5,
         action_head_timestep_mode: str = "beta",
@@ -96,6 +99,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         super().__init__(*args, **kwargs)
 
         self.action_head_enabled = bool(action_head_enabled)
+        self.action_head_lr = float(action_head_lr)
         self.action_loss_weight = float(action_loss_weight)
         self.action_delta_video_t = float(action_delta_video_t)
         self.action_head_timestep_mode = str(action_head_timestep_mode)
@@ -119,6 +123,52 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             self.action_head = ActionMIPHead(**cfg)
             if self.action_head_load_path and os.path.isfile(self.action_head_load_path):
                 self.load_action_head(self.action_head_load_path, strict=True)
+
+    def init_optimizer_scheduler(
+        self, optimizer_config: LazyDict, scheduler_config: LazyDict
+    ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+        # keep default behavior if action head is disabled
+        if not self.action_head_enabled or self.action_head is None:
+            return super().init_optimizer_scheduler(optimizer_config, scheduler_config)
+
+        lr_video = float(optimizer_config.get("lr", 2e-5))
+        weight_decay = float(optimizer_config.get("weight_decay", 0.0))
+        optim_type = str(optimizer_config.get("optim_type", "adamw")).lower()
+
+        video_params = [p for p in self.net.parameters() if p.requires_grad]
+        action_params = [p for p in self.action_head.parameters() if p.requires_grad]
+        if len(action_params) == 0:
+            return super().init_optimizer_scheduler(optimizer_config, scheduler_config)
+
+        param_groups = [
+            {"params": video_params, "lr": lr_video, "weight_decay": weight_decay},
+            {"params": action_params, "lr": self.action_head_lr, "weight_decay": weight_decay},
+        ]
+
+        betas = tuple(optimizer_config.get("betas", [0.9, 0.99]))
+        eps = float(optimizer_config.get("eps", 1e-8))
+        if optim_type == "fusedadam":
+            from cosmos_predict2._src.predict2.utils.fused_adam_dtensor import FusedAdam
+
+            optimizer = FusedAdam(
+                param_groups,
+                betas=betas,
+                eps=eps,
+                master_weights=bool(optimizer_config.get("master_weights", True)),
+                capturable=bool(optimizer_config.get("capturable", True)),
+            )
+        elif optim_type == "adamw":
+            optimizer = torch.optim.AdamW(
+                param_groups,
+                betas=betas,
+                eps=eps,
+                fused=bool(optimizer_config.get("fused", True)),
+            )
+        else:
+            raise ValueError(f"Unsupported optim_type for grouped lr: {optim_type}")
+
+        scheduler = get_base_scheduler(optimizer, self, scheduler_config)
+        return optimizer, scheduler
 
     def _normalize_video_databatch_inplace(self, data_batch: dict[str, Tensor], input_key: str = None) -> None:
         # Sampling callbacks call this before generation. For latent-direct training,
