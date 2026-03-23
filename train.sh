@@ -18,6 +18,7 @@ NPROC="${NPROC:-2}"                          # GPU 数量，单卡用 1
 MASTER_PORT="${MASTER_PORT:-12341}"
 MAX_ITERS="${MAX_ITERS:-40000}"              # 调试阶段设小，正式训练设大
 JOB_WANDB_MODE="${JOB_WANDB_MODE:-online}"
+GRAD_ACCUM_ITER="${GRAD_ACCUM_ITER:-4}"
 CHECKPOINT_LOAD_PATH="${CHECKPOINT_LOAD_PATH:-/home/jwhe/linyihan/robot_posttrain/open_loop/cosmos_diffusion_v2/robot_posttrain/my_video_experiment_20260323_133123/checkpoints/iter_000010000}"
 CHECKPOINT_LOAD_TRAINING_STATE="${CHECKPOINT_LOAD_TRAINING_STATE:-False}"
 CHECKPOINT_STRICT_RESUME="${CHECKPOINT_STRICT_RESUME:-True}"
@@ -36,6 +37,7 @@ torchrun \
     checkpoint.load_training_state=${CHECKPOINT_LOAD_TRAINING_STATE} \
     checkpoint.strict_resume=${CHECKPOINT_STRICT_RESUME} \
     trainer.max_iter=${MAX_ITERS} \
+    trainer.grad_accum_iter=${GRAD_ACCUM_ITER} \
     trainer.logging_iter=50 \
     trainer.validation_iter=5000 \
     checkpoint.save_iter=10000 \
