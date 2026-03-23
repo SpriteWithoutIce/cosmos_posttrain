@@ -163,3 +163,8 @@
 - delta cross-attn 的因果掩码改为按“帧分组解锁”：
   - 第 `j` 个 action token 仅可访问前 `floor(j/actions_per_latent)+1` 帧对应的全部空间 token。
 - `sigma` 门控仍基于帧级幅值计算（用于稳定 state 分支权重）。
+
+14. delta_v 改为“每帧 flatten 后投影” （2026-03-23）
+- `delta_v` 5D 输入现在按每帧展开：`[B,8,16,60,80] -> [B,8,16*60*80]`，再通过 `Linear(16*60*80 -> d_model)` 投影后进入 cross-attn。
+- 新增配置项：`delta_height` / `delta_width`（环境变量 `ACTION_HEAD_DELTA_H/W`，默认 `60/80`），用于校验 flatten 维度。
+- 保留 `actions_per_latent` 因果对齐规则（64 个 action token 对应 8 帧 latent）。
