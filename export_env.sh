@@ -60,4 +60,4 @@ export ACTION_HEAD_WANDB_LOG="${ACTION_HEAD_WANDB_LOG:-1}"
 export ACTION_STATE_USE_QNORM="${ACTION_STATE_USE_QNORM:-1}"
 export ACTION_STATE_NORM_CLIP="${ACTION_STATE_NORM_CLIP:-1.0}"
 # 只读一个全局 stats.json（包含所有 task 的 action/state q01/q99）
-export ACTION_STATE_GLOBAL_STATS_JSON="${ACTION_STATE_GLOBAL_STATS_JSON:-/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50/meta/stats.json}"
+export ACTION_STATE_GLOBAL_STATS_JSON="${ACTION_STATE_GLOBAL_STATS_JSON:-/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50/stats.json}"
