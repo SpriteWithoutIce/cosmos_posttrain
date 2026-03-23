@@ -46,6 +46,8 @@ COSMOS_TOKENIZER = os.environ.get(
     "/home/jwhe/linyihan/cosmos/tokenizer.pth",
 )
 OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "100"))
+OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "10"))
+OPEN_LOOP_GUIDANCE = float(os.environ.get("OPEN_LOOP_GUIDANCE", "0.0"))
 
 # ★ 你的 post-train checkpoint
 PT_CKPT = os.environ.get(
@@ -464,10 +466,18 @@ my_video_experiment = LazyDict(
             validation_iter=500,
             callbacks=dict(
                 every_n_sample_reg=dict(
-                    every_n=OPEN_LOOP_SAMPLE_EVERY, do_x0_prediction=False, guidance=[0], fps=16, save_s3=False,
+                    every_n=OPEN_LOOP_SAMPLE_EVERY,
+                    do_x0_prediction=False,
+                    guidance=[OPEN_LOOP_GUIDANCE for _ in range(OPEN_LOOP_NUM_SAMPLES)],
+                    fps=16,
+                    save_s3=False,
                 ),
                 every_n_sample_ema=dict(
-                    every_n=OPEN_LOOP_SAMPLE_EVERY, do_x0_prediction=False, guidance=[0], fps=16, save_s3=False,
+                    every_n=OPEN_LOOP_SAMPLE_EVERY,
+                    do_x0_prediction=False,
+                    guidance=[OPEN_LOOP_GUIDANCE for _ in range(OPEN_LOOP_NUM_SAMPLES)],
+                    fps=16,
+                    save_s3=False,
                 ),
                 heart_beat=dict(save_s3=False),
                 iter_speed=dict(hit_thres=100, save_s3=False),

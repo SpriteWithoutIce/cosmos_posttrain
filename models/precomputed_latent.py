@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import torch
 from torch import Tensor
 
@@ -75,6 +76,14 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         # the "video" tensor is already latent, not uint8 pixels.
         del input_key
         return
+
+    @torch.no_grad()
+    def generate_samples_from_batch(self, data_batch: dict, **kwargs) -> torch.Tensor:
+        # Callback does not pass seed; use random seed each call so repeated guidance
+        # entries can generate multiple diverse open-loop samples.
+        if "seed" not in kwargs or kwargs["seed"] is None:
+            kwargs["seed"] = random.randint(1, 2**31 - 1)
+        return super().generate_samples_from_batch(data_batch, **kwargs)
 
     def get_data_and_condition(
         self, data_batch: dict[str, torch.Tensor]
