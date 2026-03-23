@@ -1,48 +1,32 @@
 #!/bin/bash
-# =============================================================================
-# 训练启动脚本
-# =============================================================================
-set -e
-export CUDA_VISIBLE_DEVICES=2,3
-export WANDB_MODE=online
-export JOB_WANDB_MODE=online
-# 加载环境变量
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/export_env.sh"
-mkdir -p "${IMAGINAIRE_OUTPUT_ROOT}"
+source "${SCRIPT_DIR}/train_params.sh"
+export_train_env
 
-# ★ 添加 cosmos-predict2.5 到 PYTHONPATH（可通过 COSMOS_PREDICT2_ROOT 覆盖）
-export COSMOS_PREDICT2_ROOT="${COSMOS_PREDICT2_ROOT:-/home/jwhe/linyihan/cosmos-predict2.5}"
-export PYTHONPATH="${COSMOS_PREDICT2_ROOT}:$PYTHONPATH"
-# ── 参数配置 ────────────────────────────────────────────────────────────────
-CONFIG="${1:-configs/config.py}"
-NPROC="${NPROC:-2}"                          # GPU 数量，单卡用 1
-MASTER_PORT="${MASTER_PORT:-12342}"
-MAX_ITERS="${MAX_ITERS:-40000}"              # 调试阶段设小，正式训练设大
-JOB_WANDB_MODE="${JOB_WANDB_MODE:-disabled}"
-GRAD_ACCUM_ITER="${GRAD_ACCUM_ITER:-8}"
-CHECKPOINT_LOAD_PATH="${CHECKPOINT_LOAD_PATH:-/home/jwhe/linyihan/robot_posttrain/open_loop/cosmos_diffusion_v2/robot_posttrain/my_video_experiment_20260323_133123/checkpoints/iter_000010000}"
-CHECKPOINT_LOAD_TRAINING_STATE="${CHECKPOINT_LOAD_TRAINING_STATE:-False}"
-CHECKPOINT_STRICT_RESUME="${CHECKPOINT_STRICT_RESUME:-True}"
+mkdir -p "${IMAGINAIRE_OUTPUT_ROOT}" logs
 
-EXP_NAME="my_video_experiment"              # 与 configs/experiments/my_action_experiment.py 中注册名一致
+run_name="${experiment_name}_action_$(date +%Y%m%d_%H%M%S)"
+log_file="logs/train_${run_name}.log"
 
-# ── 训练命令 ────────────────────────────────────────────────────────────────
 torchrun \
-    --nproc_per_node=${NPROC} \
-    --master_port=${MASTER_PORT} \
-    -m scripts.train \
-    --config="${CONFIG}" \
-    -- \
-    experiment=${EXP_NAME} \
-    checkpoint.load_path=${CHECKPOINT_LOAD_PATH} \
-    checkpoint.load_training_state=${CHECKPOINT_LOAD_TRAINING_STATE} \
-    checkpoint.strict_resume=${CHECKPOINT_STRICT_RESUME} \
-    trainer.max_iter=${MAX_ITERS} \
-    trainer.grad_accum_iter=${GRAD_ACCUM_ITER} \
-    trainer.logging_iter=50 \
-    trainer.validation_iter=5000 \
-    checkpoint.save_iter=10000 \
-    job.wandb_mode=${JOB_WANDB_MODE} \
-    job.name=${EXP_NAME}_action_$(date +%Y%m%d_%H%M%S) \
-    # > logs/train_${EXP_NAME}_$(date +%Y%m%d_%H%M%S).log 2>&1
+  --nproc_per_node="${nproc}" \
+  --master_port="${master_port}" \
+  -m scripts.train \
+  --config="${config}" \
+  -- \
+  experiment="${experiment_name}" \
+  checkpoint.load_path="${checkpoint_load_path}" \
+  checkpoint.load_training_state="${checkpoint_load_training_state}" \
+  checkpoint.strict_resume="${checkpoint_strict_resume}" \
+  trainer.max_iter="${max_iters}" \
+  trainer.grad_accum_iter="${grad_accum_iter}" \
+  trainer.logging_iter="${logging_iter}" \
+  trainer.validation_iter="${validation_iter}" \
+  checkpoint.save_iter="${checkpoint_save_iter}" \
+  job.wandb_mode="${wandb_mode}" \
+  job.name="${run_name}" \
+  > "${log_file}" 2>&1
+
+echo "Training started. Log: ${log_file}"
