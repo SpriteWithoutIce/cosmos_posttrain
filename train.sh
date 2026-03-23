@@ -16,13 +16,8 @@ export PYTHONPATH="${COSMOS_PREDICT2_ROOT}:$PYTHONPATH"
 CONFIG="${1:-configs/config.py}"
 NPROC="${NPROC:-4}"                          # GPU 数量，单卡用 1
 MASTER_PORT="${MASTER_PORT:-12341}"
-<<<<<<< HEAD
-MAX_ITERS="${MAX_ITERS:-1000}"              # 调试阶段设小，正式训练设大
-JOB_WANDB_MODE="${JOB_WANDB_MODE:-disabled}"
-=======
 MAX_ITERS="${MAX_ITERS:-10000}"              # 调试阶段设小，正式训练设大
 JOB_WANDB_MODE="${JOB_WANDB_MODE:-online}"
->>>>>>> 4bb022d70ceb152f3479141886001a20188f8fa1
 
 EXP_NAME="my_video_experiment"              # 与 configs/experiments/my_action_experiment.py 中注册名一致
 
