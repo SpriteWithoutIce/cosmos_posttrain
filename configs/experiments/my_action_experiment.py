@@ -20,6 +20,7 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
+from einops import rearrange
 from hydra.core.config_store import ConfigStore
 from megatron.core import parallel_state
 from torch.utils.data import DataLoader, DistributedSampler
@@ -200,6 +201,21 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
 
         data = torch.load(latent_file, weights_only=False)
         latents = data["latent"].float()
+        # Normalize latent layout to (T, C, H, W).
+        # Some preprocess pipelines save (C, T, H, W), while this dataset logic expects time-first.
+        if latents.ndim != 4:
+            raise ValueError(f"Invalid latent shape {tuple(latents.shape)} for episode {episode_index}")
+        if latents.shape[1] == self.action_dim:
+            # already (T, C, H, W) for C=16
+            pass
+        elif latents.shape[0] == self.action_dim:
+            # convert (C, T, H, W) -> (T, C, H, W)
+            latents = rearrange(latents, "c t h w -> t c h w").contiguous()
+        else:
+            raise ValueError(
+                f"Unrecognized latent layout {tuple(latents.shape)} for episode {episode_index}; "
+                f"expected channel dim == {self.action_dim}"
+            )
         n_latents = int(data["latent_num_frames"])
         frame_ids = data["frame_ids"]
         text_emb = data.get("text_emb", None)
@@ -290,8 +306,11 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
                 )
                 self._last_debug_ts = now
 
+        # Model expects video latent shape as (C, T, H, W) per sample.
+        video_cthw = rearrange(final_latents, "t c h w -> c t h w").contiguous()
+
         return {
-            "video": final_latents,              # 模型读 "video"
+            "video": video_cthw,                 # 模型读 "video"
             "actions": torch.from_numpy(actions).float(),
             "states": torch.from_numpy(states).float(),
             "episode_index": episode_index,
