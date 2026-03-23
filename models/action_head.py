@@ -152,6 +152,15 @@ class ActionDiTBlock(nn.Module):
         temb: torch.Tensor,
         causal_mask: torch.Tensor,
     ) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"ActionDiTBlock expects x [B,L,D], got {tuple(x.shape)}")
+        if delta_tokens.ndim != 3:
+            raise ValueError(f"ActionDiTBlock expects delta_tokens [B,Lkv,D], got {tuple(delta_tokens.shape)}")
+        if state_tokens.ndim != 3:
+            raise ValueError(f"ActionDiTBlock expects state_tokens [B,Ls,D], got {tuple(state_tokens.shape)}")
+        if sigma.ndim != 3:
+            raise ValueError(f"ActionDiTBlock expects sigma [B,L,1], got {tuple(sigma.shape)}")
+
         h = self.self_norm(x, temb)
         h, _ = self.self_attn(h, h, h, attn_mask=causal_mask, need_weights=False)
         x = x + h
@@ -251,7 +260,7 @@ class ActionMIPHead(nn.Module):
         if delta_v.ndim == 5:
             # [B, T, C, H, W] -> aggregate spatially for gating only
             # delta small -> sigma large; delta large -> sigma small
-            delta_mag = torch.norm(delta_v, dim=2).mean(dim=(-1, -2), keepdim=True)  # [B, T, 1]
+            delta_mag = torch.norm(delta_v, dim=2).mean(dim=(-1, -2), keepdim=False).unsqueeze(-1)  # [B, T, 1]
             sigma_t = torch.exp(-self.sigma_k * delta_mag)
             t = sigma_t.shape[1]
             repeat = max(1, num_actions // t)
@@ -319,15 +328,27 @@ class ActionMIPHead(nn.Module):
         bsz, L, _ = z_action.shape
         assert L == self.num_actions, f"Expected num_actions={self.num_actions}, got {L}"
         cat_ids = torch.zeros(bsz, dtype=torch.long, device=z_action.device)
-        x = self.action_encoder(z_action, timesteps=timestep if timestep is not None else torch.zeros(bsz, device=z_action.device, dtype=torch.long), cat_ids=cat_ids)
+        x = self.action_encoder(
+            z_action,
+            timesteps=timestep if timestep is not None else torch.zeros(bsz, device=z_action.device, dtype=torch.long),
+            cat_ids=cat_ids,
+        )
+        if x.ndim != 3:
+            raise ValueError(f"action_encoder output must be [B,L,D], got {tuple(x.shape)}")
         pos_ids = torch.arange(L, dtype=torch.long, device=z_action.device)
         x = x + self.pos_embedding(pos_ids).unsqueeze(0)
         temb = self._build_temb(timestep, batch_size=bsz, device=x.device)
 
         delta_tokens = self._prepare_delta_tokens(delta_v)
+        if delta_tokens.ndim != 3:
+            raise ValueError(f"delta tokens must be [B,Lkv,D], got {tuple(delta_tokens.shape)}")
         state_tokens = self.state_encoder(state_vec.unsqueeze(1), cat_ids)
         state_tokens = state_tokens + self.state_proj(state_vec).unsqueeze(1)
+        if state_tokens.ndim != 3:
+            raise ValueError(f"state tokens must be [B,Ls,D], got {tuple(state_tokens.shape)}")
         sigma = self._compute_state_sigma(delta_v, num_actions=L)
+        if sigma.ndim != 3 or sigma.shape[1] != L:
+            raise ValueError(f"sigma must be [B,{L},1], got {tuple(sigma.shape)}")
 
         causal_mask = self._build_causal_mask(L, x.device)
         for block in self.blocks:
