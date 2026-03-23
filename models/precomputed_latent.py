@@ -4,6 +4,7 @@ import os
 import random
 import torch
 import torch.nn.functional as F
+from torch.distributions import Beta
 from torch import Tensor
 
 from cosmos_predict2._src.predict2.conditioner import DataType
@@ -81,8 +82,11 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         action_head_cfg: dict | None = None,
         action_loss_weight: float = 1.0,
         action_delta_video_t: float = 0.5,
-        action_head_timestep_mode: str = "random",
+        action_head_timestep_mode: str = "beta",
         action_head_fixed_timestep: int = 0,
+        action_head_noise_beta_alpha: float = 1.5,
+        action_head_noise_beta_beta: float = 1.0,
+        action_head_noise_s: float = 0.999,
         action_head_save_every: int = 0,
         action_head_save_dir: str | None = None,
         action_head_load_path: str | None = None,
@@ -95,6 +99,10 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         self.action_delta_video_t = float(action_delta_video_t)
         self.action_head_timestep_mode = str(action_head_timestep_mode)
         self.action_head_fixed_timestep = int(action_head_fixed_timestep)
+        self.action_head_noise_beta_alpha = float(action_head_noise_beta_alpha)
+        self.action_head_noise_beta_beta = float(action_head_noise_beta_beta)
+        self.action_head_noise_s = float(action_head_noise_s)
+        self._action_beta_dist = Beta(self.action_head_noise_beta_alpha, self.action_head_noise_beta_beta)
         self.action_head_save_every = int(action_head_save_every)
         self.action_head_save_dir = action_head_save_dir
         self.action_head_load_path = action_head_load_path
@@ -250,14 +258,24 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         prev_v = v_seq[:, num_cond - 1 : num_cond + num_pred - 1, :]
         return pred_v - prev_v
 
-    def _sample_action_head_timestep(self, batch_size: int, device: torch.device) -> torch.Tensor:
+    def _sample_action_head_timestep(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         buckets = int(getattr(self.action_head, "timestep_buckets", 1000))
         mode = self.action_head_timestep_mode.lower()
         if mode == "fixed":
             t = max(0, min(buckets - 1, int(self.action_head_fixed_timestep)))
-            return torch.full((batch_size,), t, device=device, dtype=torch.long)
-        # default: independent random timestep
-        return torch.randint(low=0, high=buckets, size=(batch_size,), device=device, dtype=torch.long)
+            t_disc = torch.full((batch_size,), t, device=device, dtype=torch.long)
+            t_cont = t_disc.float() / max(buckets - 1, 1)
+            return t_cont, t_disc
+        if mode == "random":
+            t_cont = torch.rand(batch_size, device=device, dtype=torch.float32)
+            t_disc = torch.clamp((t_cont * buckets).long(), 0, buckets - 1)
+            return t_cont, t_disc
+        # default: beta continuous sampling then discretize (reasoningVLA style)
+        sample = self._action_beta_dist.sample([batch_size]).to(device=device, dtype=torch.float32)
+        t_cont = (self.action_head_noise_s - sample) / self.action_head_noise_s
+        t_cont = torch.clamp(t_cont, 0.0, 1.0)
+        t_disc = torch.clamp((t_cont * buckets).long(), 0, buckets - 1)
+        return t_cont, t_disc
 
     def _maybe_save_action_head(self, iteration: int) -> None:
         if not self.action_head_enabled or self.action_head is None:
@@ -320,30 +338,40 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             )
             self._action_head_debug_printed = True
 
+        action_t_cont, action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
         noise = torch.randn_like(actions)
         z1 = noise
-        z2 = 0.9 * actions + noise
-        action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
+        z2 = ((1.0 - action_t_cont[:, None, None]) * noise + action_t_cont[:, None, None] * actions)
 
         pred1 = self.action_head(z1, delta_v, states, timestep=action_t)
         pred2 = self.action_head(z2, delta_v, states, timestep=action_t)
 
-        action_loss = 0.5 * (F.mse_loss(pred1, actions) + F.mse_loss(pred2, actions))
+        action_loss_1 = F.mse_loss(pred1, actions)
+        action_loss_2 = F.mse_loss(pred2, actions)
+        action_loss = 0.5 * (action_loss_1 + action_loss_2)
         total_loss = loss + self.action_loss_weight * action_loss
 
+        output_batch["action_loss_1"] = action_loss_1.detach()
+        output_batch["action_loss_2"] = action_loss_2.detach()
         output_batch["action_loss"] = action_loss.detach()
         output_batch["video_loss"] = loss.detach()
         output_batch["total_loss"] = total_loss.detach()
+        output_batch["metrics/action_loss_1"] = output_batch["action_loss_1"]
+        output_batch["metrics/action_loss_2"] = output_batch["action_loss_2"]
         output_batch["metrics/action_loss"] = output_batch["action_loss"]
         output_batch["metrics/video_loss"] = output_batch["video_loss"]
         output_batch["metrics/total_loss"] = output_batch["total_loss"]
+        output_batch["metrics/action_timestep_mean"] = action_t_cont.detach().mean()
 
         if self._is_rank0() and self._action_head_log_every > 0 and iteration % self._action_head_log_every == 0:
             print(
                 (
                     f"[action-head] iter={iteration} "
                     f"video_loss={float(loss.detach().item()):.6f} "
+                    f"action_loss_1={float(action_loss_1.detach().item()):.6f} "
+                    f"action_loss_2={float(action_loss_2.detach().item()):.6f} "
                     f"action_loss={float(action_loss.detach().item()):.6f} "
+                    f"action_t={float(action_t_cont.detach().mean().item()):.4f} "
                     f"total_loss={float(total_loss.detach().item()):.6f}"
                 ),
                 flush=True,
@@ -356,7 +384,10 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                         wandb.log(
                             {
                                 "train/video_loss": float(loss.detach().item()),
+                                "train/action_loss_1": float(action_loss_1.detach().item()),
+                                "train/action_loss_2": float(action_loss_2.detach().item()),
                                 "train/action_loss": float(action_loss.detach().item()),
+                                "train/action_timestep_mean": float(action_t_cont.detach().mean().item()),
                                 "train/total_loss": float(total_loss.detach().item()),
                             },
                             step=int(iteration),

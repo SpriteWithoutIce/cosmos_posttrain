@@ -34,6 +34,85 @@ class AdaLayerNorm(nn.Module):
         return self.norm(x) * (1.0 + scale[:, None, :]) + shift[:, None, :]
 
 
+def swish(x: torch.Tensor) -> torch.Tensor:
+    return x * torch.sigmoid(x)
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+
+    def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
+        # timesteps: [B, T]
+        timesteps = timesteps.float()
+        bsz, T = timesteps.shape
+        device = timesteps.device
+        half_dim = self.embedding_dim // 2
+        exponent = -torch.arange(half_dim, dtype=torch.float, device=device) * (
+            torch.log(torch.tensor(10000.0, device=device)) / max(half_dim, 1)
+        )
+        freqs = timesteps.unsqueeze(-1) * exponent.exp()
+        sin = torch.sin(freqs)
+        cos = torch.cos(freqs)
+        enc = torch.cat([sin, cos], dim=-1)
+        if enc.shape[-1] < self.embedding_dim:
+            enc = torch.cat([enc, torch.zeros(bsz, T, self.embedding_dim - enc.shape[-1], device=device)], dim=-1)
+        return enc
+
+
+class CategorySpecificLinear(nn.Module):
+    def __init__(self, num_categories: int, input_dim: int, hidden_dim: int):
+        super().__init__()
+        self.W = nn.Parameter(0.02 * torch.randn(num_categories, input_dim, hidden_dim))
+        self.b = nn.Parameter(torch.zeros(num_categories, hidden_dim))
+
+    def forward(self, x: torch.Tensor, cat_ids: torch.Tensor) -> torch.Tensor:
+        selected_W = self.W[cat_ids]  # [B, Din, Dout]
+        selected_b = self.b[cat_ids]  # [B, Dout]
+        return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
+
+
+class CategorySpecificMLP(nn.Module):
+    def __init__(self, num_categories: int, input_dim: int, hidden_dim: int, output_dim: int):
+        super().__init__()
+        self.layer1 = CategorySpecificLinear(num_categories, input_dim, hidden_dim)
+        self.layer2 = CategorySpecificLinear(num_categories, hidden_dim, output_dim)
+
+    def forward(self, x: torch.Tensor, cat_ids: torch.Tensor) -> torch.Tensor:
+        hidden = torch.relu(self.layer1(x, cat_ids))
+        return self.layer2(hidden, cat_ids)
+
+
+class MultiEmbodimentActionEncoder(nn.Module):
+    """
+    Adapted from reasoningVLA flow_matching_action_head:
+      actions + timestep encoding -> action token embeddings.
+    """
+
+    def __init__(self, action_dim: int, hidden_size: int, num_embodiments: int = 1):
+        super().__init__()
+        self.W1 = CategorySpecificLinear(num_embodiments, action_dim, hidden_size)
+        self.W2 = CategorySpecificLinear(num_embodiments, 2 * hidden_size, hidden_size)
+        self.W3 = CategorySpecificLinear(num_embodiments, hidden_size, hidden_size)
+        self.pos_encoding = SinusoidalPositionalEncoding(hidden_size)
+
+    def forward(self, actions: torch.Tensor, timesteps: torch.Tensor, cat_ids: torch.Tensor) -> torch.Tensor:
+        # actions: [B, T, action_dim], timesteps: [B] (discrete)
+        bsz, T, _ = actions.shape
+        if timesteps.ndim == 1 and timesteps.shape[0] == bsz:
+            timesteps = timesteps.unsqueeze(1).expand(-1, T)
+        else:
+            raise ValueError(f"Expected timesteps shape [B], got {tuple(timesteps.shape)}")
+
+        a_emb = self.W1(actions, cat_ids)
+        tau_emb = self.pos_encoding(timesteps).to(dtype=a_emb.dtype)
+        x = torch.cat([a_emb, tau_emb], dim=-1)
+        x = swish(self.W2(x, cat_ids))
+        x = self.W3(x, cat_ids)
+        return x
+
+
 class ActionDiTBlock(nn.Module):
     """
     DiT-style block:
@@ -116,10 +195,14 @@ class ActionMIPHead(nn.Module):
         self.num_actions = num_actions
         self.sigma_k = sigma_k
         self.timestep_buckets = timestep_buckets
-
-        self.in_proj = nn.Linear(action_dim, d_model)
+        hidden_mlp = max(128, d_model // 2)
+        self.action_encoder = MultiEmbodimentActionEncoder(action_dim=action_dim, hidden_size=d_model, num_embodiments=1)
+        self.state_encoder = CategorySpecificMLP(
+            num_categories=1, input_dim=state_dim, hidden_dim=hidden_mlp, output_dim=d_model
+        )
         self.delta_proj = nn.Linear(delta_dim, d_model)
         self.state_proj = nn.Linear(state_dim, d_model)
+        self.pos_embedding = nn.Embedding(num_actions, d_model)
         self.time_mlp = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.SiLU(),
@@ -132,7 +215,9 @@ class ActionMIPHead(nn.Module):
 
         self.out_norm = nn.LayerNorm(d_model, eps=1e-6, elementwise_affine=False)
         self.out_mod = nn.Sequential(nn.SiLU(), nn.Linear(d_model, 2 * d_model))
-        self.out_proj = nn.Linear(d_model, action_dim)
+        self.action_decoder = CategorySpecificMLP(
+            num_categories=1, input_dim=d_model, hidden_dim=hidden_mlp, output_dim=action_dim
+        )
 
     @staticmethod
     def _build_causal_mask(length: int, device: torch.device) -> torch.Tensor:
@@ -153,7 +238,7 @@ class ActionMIPHead(nn.Module):
         t = t.clamp(min=0).float()
         t = torch.round(t).long()
         t = torch.clamp(t, 0, self.timestep_buckets - 1)
-        return self.time_mlp(_sinusoidal_timestep_embedding(t, self.in_proj.out_features))
+        return self.time_mlp(_sinusoidal_timestep_embedding(t, self.delta_proj.out_features))
 
     def forward(
         self,
@@ -173,13 +258,16 @@ class ActionMIPHead(nn.Module):
         """
         bsz, L, _ = z_action.shape
         assert L == self.num_actions, f"Expected num_actions={self.num_actions}, got {L}"
-
-        x = self.in_proj(z_action)
+        cat_ids = torch.zeros(bsz, dtype=torch.long, device=z_action.device)
+        x = self.action_encoder(z_action, timesteps=timestep if timestep is not None else torch.zeros(bsz, device=z_action.device, dtype=torch.long), cat_ids=cat_ids)
+        pos_ids = torch.arange(L, dtype=torch.long, device=z_action.device)
+        x = x + self.pos_embedding(pos_ids).unsqueeze(0)
         temb = self._build_temb(timestep, batch_size=bsz, device=x.device)
 
         repeat_factor = self.num_actions // delta_v.shape[1]
         delta_tokens = self.delta_proj(delta_v.repeat_interleave(repeat_factor, dim=1))
-        state_tokens = self.state_proj(state_vec).unsqueeze(1)
+        state_tokens = self.state_encoder(state_vec.unsqueeze(1), cat_ids)
+        state_tokens = state_tokens + self.state_proj(state_vec).unsqueeze(1)
         sigma = self._compute_sigma(delta_tokens)
 
         causal_mask = self._build_causal_mask(L, x.device)
@@ -188,4 +276,4 @@ class ActionMIPHead(nn.Module):
 
         shift, scale = self.out_mod(temb).chunk(2, dim=-1)
         x = self.out_norm(x) * (1.0 + scale[:, None, :]) + shift[:, None, :]
-        return self.out_proj(x)
+        return self.action_decoder(x, cat_ids)

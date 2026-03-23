@@ -45,13 +45,17 @@
 
 5. action loss 日志
 - 控制台周期打印：
-  - `[action-head] iter=... video_loss=... action_loss=... total_loss=...`
+  - `[action-head] iter=... video_loss=... action_loss_1=... action_loss_2=... action_loss=... total_loss=...`
 - 若 wandb 已开启（online/offline 且 run 已初始化），同步记录：
   - `train/video_loss`
+  - `train/action_loss_1`
+  - `train/action_loss_2`
   - `train/action_loss`
   - `train/total_loss`
 - 同时在 `output_batch` 写入：
+  - `action_loss_1 / action_loss_2`
   - `action_loss / video_loss / total_loss`
+  - `metrics/action_loss_1 / metrics/action_loss_2`
   - `metrics/action_loss / metrics/video_loss / metrics/total_loss`
 
 6. action/state q01-q99 归一化
@@ -71,6 +75,7 @@
 - `models/action_head.py` 重构为 timestep-aware 的 DiT 样式：
   - sinusoidal timestep embedding + MLP
   - AdaLayerNorm 调制
+  - 引入参考实现风格的 `action_encoder / state_encoder / action_decoder`
   - 每个 block: `1x self-attn + 3x delta cross-attn + 1x state cross-attn + FFN`
   - state 分支保留 sigma 门控
 - 训练时使用 `output_batch["timesteps"]` 作为 action head 的 timestep 条件。
@@ -83,8 +88,12 @@
   - 用该 velocity 计算 8 个 `delta_v`
   - 这条分支保留梯度，`action_loss` 仍可更新 video model 参数
 - action head 的 timestep 与 video timestep 解耦：
-  - `ACTION_HEAD_TIMESTEP_MODE=random`：独立随机
+  - `ACTION_HEAD_TIMESTEP_MODE=beta`：Beta 连续采样后离散化（默认）
+  - `ACTION_HEAD_TIMESTEP_MODE=random`：独立均匀随机
   - `ACTION_HEAD_TIMESTEP_MODE=fixed`：固定 `ACTION_HEAD_FIXED_TIMESTEP`
+- action 分支噪声轨迹更新为 Beta 时间控制：
+  - `z2 = (1-t)*noise + t*action`
+  - `t` 为 action head 独立采样时间（Beta/Random/Fixed）
 
 ## 环境变量
 在 `export_env.sh` 新增：
@@ -98,6 +107,9 @@
 - `ACTION_DELTA_VIDEO_T`
 - `ACTION_HEAD_TIMESTEP_MODE`
 - `ACTION_HEAD_FIXED_TIMESTEP`
+- `ACTION_HEAD_NOISE_BETA_ALPHA`
+- `ACTION_HEAD_NOISE_BETA_BETA`
+- `ACTION_HEAD_NOISE_BETA_S`
 - `ACTION_STATE_USE_QNORM`
 - `ACTION_STATE_NORM_CLIP`
 - `ACTION_STATE_GLOBAL_STATS_JSON`
