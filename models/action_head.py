@@ -232,6 +232,37 @@ class ActionMIPHead(nn.Module):
         delta_mag = torch.norm(delta_tokens, dim=-1, keepdim=True)
         return torch.exp(-self.sigma_k * delta_mag)
 
+    def _compute_state_sigma(self, delta_v: torch.Tensor, num_actions: int) -> torch.Tensor:
+        """
+        Build sigma gate aligned to action token length [B, num_actions, 1].
+        This gate controls the state branch only, so it must match x/h sequence length.
+        """
+        if delta_v.ndim == 3:
+            # [B, T, C] -> [B, T, 1]
+            sigma_t = torch.exp(-self.sigma_k * torch.norm(delta_v, dim=-1, keepdim=True))
+            t = sigma_t.shape[1]
+            repeat = max(1, num_actions // t)
+            sigma = sigma_t.repeat_interleave(repeat, dim=1)
+            if sigma.shape[1] < num_actions:
+                pad = sigma[:, -1:, :].repeat(1, num_actions - sigma.shape[1], 1)
+                sigma = torch.cat([sigma, pad], dim=1)
+            return sigma[:, :num_actions, :]
+
+        if delta_v.ndim == 5:
+            # [B, T, C, H, W] -> aggregate spatially for gating only
+            # delta small -> sigma large; delta large -> sigma small
+            delta_mag = torch.norm(delta_v, dim=2).mean(dim=(-1, -2), keepdim=True)  # [B, T, 1]
+            sigma_t = torch.exp(-self.sigma_k * delta_mag)
+            t = sigma_t.shape[1]
+            repeat = max(1, num_actions // t)
+            sigma = sigma_t.repeat_interleave(repeat, dim=1)
+            if sigma.shape[1] < num_actions:
+                pad = sigma[:, -1:, :].repeat(1, num_actions - sigma.shape[1], 1)
+                sigma = torch.cat([sigma, pad], dim=1)
+            return sigma[:, :num_actions, :]
+
+        raise ValueError(f"Unsupported delta_v shape for sigma gate: {tuple(delta_v.shape)}")
+
     def _prepare_delta_tokens(self, delta_v: torch.Tensor) -> torch.Tensor:
         """
         Support both:
@@ -296,7 +327,7 @@ class ActionMIPHead(nn.Module):
         delta_tokens = self._prepare_delta_tokens(delta_v)
         state_tokens = self.state_encoder(state_vec.unsqueeze(1), cat_ids)
         state_tokens = state_tokens + self.state_proj(state_vec).unsqueeze(1)
-        sigma = self._compute_sigma(delta_tokens)
+        sigma = self._compute_state_sigma(delta_v, num_actions=L)
 
         causal_mask = self._build_causal_mask(L, x.device)
         for block in self.blocks:
