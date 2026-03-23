@@ -19,8 +19,8 @@ CONFIG="${1:-configs/config.py}"
 NPROC="${NPROC:-2}"                          # GPU 数量，单卡用 1
 MASTER_PORT="${MASTER_PORT:-12342}"
 MAX_ITERS="${MAX_ITERS:-40000}"              # 调试阶段设小，正式训练设大
-JOB_WANDB_MODE="${JOB_WANDB_MODE:-online}"
-GRAD_ACCUM_ITER="${GRAD_ACCUM_ITER:-4}"
+JOB_WANDB_MODE="${JOB_WANDB_MODE:-disabled}"
+GRAD_ACCUM_ITER="${GRAD_ACCUM_ITER:-1}"
 CHECKPOINT_LOAD_PATH="${CHECKPOINT_LOAD_PATH:-/home/jwhe/linyihan/robot_posttrain/open_loop/cosmos_diffusion_v2/robot_posttrain/my_video_experiment_20260323_133123/checkpoints/iter_000010000}"
 CHECKPOINT_LOAD_TRAINING_STATE="${CHECKPOINT_LOAD_TRAINING_STATE:-False}"
 CHECKPOINT_STRICT_RESUME="${CHECKPOINT_STRICT_RESUME:-True}"
@@ -42,8 +42,7 @@ torchrun \
     trainer.grad_accum_iter=${GRAD_ACCUM_ITER} \
     trainer.logging_iter=50 \
     trainer.validation_iter=5000 \
-    trainer.grad_accum_iter=${GRAD_ACCUM_ITER} \
     checkpoint.save_iter=10000 \
     job.wandb_mode=${JOB_WANDB_MODE} \
     job.name=${EXP_NAME}_action_$(date +%Y%m%d_%H%M%S) \
-    > logs/train_${EXP_NAME}_$(date +%Y%m%d_%H%M%S).log 2>&1
+    # > logs/train_${EXP_NAME}_$(date +%Y%m%d_%H%M%S).log 2>&1
