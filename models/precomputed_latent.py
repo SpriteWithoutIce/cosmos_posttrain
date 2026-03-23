@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import random
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from cosmos_predict2._src.predict2.conditioner import DataType
@@ -10,6 +12,7 @@ from cosmos_predict2._src.predict2.models.video2world_model_rectified_flow impor
     NUM_CONDITIONAL_FRAMES_KEY,
     Video2WorldModelRectifiedFlow,
 )
+from models.action_head import ActionMIPHead
 
 
 class IdentityLatentTokenizer(torch.nn.Module):
@@ -71,6 +74,34 @@ class IdentityLatentTokenizer(torch.nn.Module):
 class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
     """Video2World model variant that consumes precomputed latents directly."""
 
+    def __init__(
+        self,
+        *args,
+        action_head_enabled: bool = False,
+        action_head_cfg: dict | None = None,
+        action_loss_weight: float = 1.0,
+        action_head_save_every: int = 0,
+        action_head_save_dir: str | None = None,
+        action_head_load_path: str | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.action_head_enabled = bool(action_head_enabled)
+        self.action_loss_weight = float(action_loss_weight)
+        self.action_head_save_every = int(action_head_save_every)
+        self.action_head_save_dir = action_head_save_dir
+        self.action_head_load_path = action_head_load_path
+
+        self.action_head = None
+        self._action_head_debug = os.environ.get("ACTION_HEAD_DEBUG", "0") == "1"
+        self._action_head_debug_printed = False
+        if self.action_head_enabled:
+            cfg = dict(action_head_cfg or {})
+            self.action_head = ActionMIPHead(**cfg)
+            if self.action_head_load_path and os.path.isfile(self.action_head_load_path):
+                self.load_action_head(self.action_head_load_path, strict=True)
+
     def _normalize_video_databatch_inplace(self, data_batch: dict[str, Tensor], input_key: str = None) -> None:
         # Sampling callbacks call this before generation. For latent-direct training,
         # the "video" tensor is already latent, not uint8 pixels.
@@ -112,3 +143,143 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             conditional_frames_probs=self.config.conditional_frames_probs,
         )
         return raw_state, latent_state, condition
+
+    def state_dict(self, *args, **kwargs):
+        sd = super().state_dict(*args, **kwargs)
+        if not isinstance(sd, dict):
+            return sd
+        return {k: v for k, v in sd.items() if not k.startswith("action_head.")}
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        if not self.action_head_enabled:
+            return super().load_state_dict(state_dict, strict=strict)
+
+        # Keep video checkpoint strictness while allowing action_head to be absent.
+        result = super().load_state_dict(state_dict, strict=False)
+        if strict:
+            missing = [k for k in result.missing_keys if not k.startswith("action_head.")]
+            unexpected = [k for k in result.unexpected_keys if not k.startswith("action_head.")]
+            if missing or unexpected:
+                raise RuntimeError(
+                    f"Error(s) in loading state_dict for {self.__class__.__name__}: "
+                    f"missing={missing}, unexpected={unexpected}"
+                )
+        return result
+
+    @staticmethod
+    def _is_rank0() -> bool:
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return True
+        return torch.distributed.get_rank() == 0
+
+    @staticmethod
+    def _extract_velocity_tensor(output_batch: dict) -> Tensor | None:
+        candidate_keys = (
+            "vt_pred_B_C_T_H_W",
+            "vt_pred",
+            "velocity_pred",
+            "pred_velocity",
+            "pred_v",
+            "net_output_B_C_T_H_W",
+        )
+        for key in candidate_keys:
+            val = output_batch.get(key, None)
+            if torch.is_tensor(val) and val.ndim == 5:
+                return val
+        return None
+
+    def _compute_delta_v(self, output_batch: dict, num_cond: int, num_pred: int) -> Tensor:
+        v_pred = self._extract_velocity_tensor(output_batch)
+        if v_pred is None:
+            if self._action_head_debug and self._is_rank0():
+                print(
+                    "[action-head][debug] output_batch keys:",
+                    sorted(list(output_batch.keys())),
+                    flush=True,
+                )
+            raise KeyError(
+                "Cannot find predicted velocity tensor in output_batch. "
+                "Expected one of: vt_pred_B_C_T_H_W / vt_pred / velocity_pred / pred_velocity / pred_v."
+            )
+        # v_pred: [B, C, T, H, W] -> [B, T, C] via global spatial pooling.
+        v_seq = v_pred.mean(dim=(-1, -2)).transpose(1, 2).contiguous()
+        t_total = v_seq.shape[1]
+        if num_cond + num_pred > t_total:
+            raise ValueError(f"Invalid cond/pred split: cond={num_cond}, pred={num_pred}, total={t_total}")
+
+        pred_v = v_seq[:, num_cond : num_cond + num_pred, :]
+        prev_v = v_seq[:, num_cond - 1 : num_cond + num_pred - 1, :]
+        return pred_v - prev_v
+
+    def _maybe_save_action_head(self, iteration: int) -> None:
+        if not self.action_head_enabled or self.action_head is None:
+            return
+        if self.action_head_save_every <= 0 or iteration <= 0 or (iteration % self.action_head_save_every != 0):
+            return
+        if not self._is_rank0():
+            return
+        save_dir = self.action_head_save_dir
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        fp = os.path.join(save_dir, f"action_head_iter_{iteration:07d}.pt")
+        payload = {
+            "iteration": int(iteration),
+            "action_head": self.action_head.state_dict(),
+        }
+        torch.save(payload, fp)
+        print(f"[action-head] saved: {fp}", flush=True)
+
+    def load_action_head(self, checkpoint_path: str, strict: bool = True) -> None:
+        if not self.action_head_enabled or self.action_head is None:
+            return
+        obj = torch.load(checkpoint_path, map_location="cpu")
+        if isinstance(obj, dict) and "action_head" in obj:
+            sd = obj["action_head"]
+        else:
+            sd = obj
+        self.action_head.load_state_dict(sd, strict=strict)
+        print(f"[action-head] loaded: {checkpoint_path}", flush=True)
+
+    def training_step(self, data_batch: dict, iteration: int = 0):
+        output_batch, loss = super().training_step(data_batch, iteration)
+        if not self.action_head_enabled or self.action_head is None:
+            return output_batch, loss
+
+        actions = data_batch.get("actions", None)
+        states = data_batch.get("states", None)
+        if actions is None or states is None:
+            raise KeyError("Action head enabled, but batch is missing 'actions' or 'states'.")
+        if actions.ndim != 3 or states.ndim != 2:
+            raise ValueError(f"Invalid action/state shapes: actions={tuple(actions.shape)}, states={tuple(states.shape)}")
+
+        actions = actions.to(loss.device).float()
+        states = states.to(loss.device).float()
+
+        num_cond = int(getattr(self.config, "min_num_conditional_frames", 4))
+        num_pred = 8
+        delta_v = self._compute_delta_v(output_batch, num_cond=num_cond, num_pred=num_pred).to(loss.device)
+        if self._action_head_debug and (not self._action_head_debug_printed) and self._is_rank0():
+            print(
+                "[action-head][debug]",
+                f"actions={tuple(actions.shape)} states={tuple(states.shape)} delta_v={tuple(delta_v.shape)}",
+                flush=True,
+            )
+            self._action_head_debug_printed = True
+
+        noise = torch.randn_like(actions)
+        z1 = noise
+        z2 = 0.9 * actions + noise
+
+        pred1 = self.action_head(z1, delta_v, states)
+        pred2 = self.action_head(z2, delta_v, states)
+
+        action_loss = 0.5 * (F.mse_loss(pred1, actions) + F.mse_loss(pred2, actions))
+        total_loss = loss + self.action_loss_weight * action_loss
+
+        output_batch["action_loss"] = action_loss.detach()
+        output_batch["video_loss"] = loss.detach()
+        output_batch["total_loss"] = total_loss.detach()
+
+        self._maybe_save_action_head(iteration=iteration)
+        return output_batch, total_loss

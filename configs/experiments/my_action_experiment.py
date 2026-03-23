@@ -48,6 +48,14 @@ COSMOS_TOKENIZER = os.environ.get(
 OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "200"))
 OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "1"))
 OPEN_LOOP_GUIDANCE = float(os.environ.get("OPEN_LOOP_GUIDANCE", "0.0"))
+ACTION_HEAD_ENABLED = int(os.environ.get("ACTION_HEAD_ENABLED", "1"))
+ACTION_HEAD_LOSS_WEIGHT = float(os.environ.get("ACTION_HEAD_LOSS_WEIGHT", "1.0"))
+ACTION_HEAD_SAVE_EVERY = int(os.environ.get("ACTION_HEAD_SAVE_EVERY", "500"))
+ACTION_HEAD_SAVE_DIR = os.environ.get(
+    "ACTION_HEAD_SAVE_DIR",
+    "/home/jwhe/linyihan/robot_posttrain/action_head_ckpt",
+)
+ACTION_HEAD_LOAD_PATH = os.environ.get("ACTION_HEAD_LOAD_PATH", "")
 
 # ★ 你的 post-train checkpoint
 PT_CKPT = os.environ.get(
@@ -276,14 +284,16 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         # === 合并: 4 + 8 = 12 ===
         final_latents = torch.cat([cond_latents, target_latents], dim=0)
 
-        # === 64 个 action ===
+        # === 64 个 action（按 pred_idx 对齐）===
+        # 用户定义规则:
+        #   action_start = (pred_idx - 1) * 4
+        #   actions = [action_start : action_start + 8*8)
+        #   state = state[action_start] (16-dim)
         num_actions = self.num_pred_frames * self.num_actions_per_latent
-        if frame_ids_t is not None:
-            action_start = int(frame_ids_t[pred_idx].item())
-        else:
-            action_start = pred_idx * self.time_division_factor
+        action_start = (pred_idx - 1) * self.time_division_factor
         action_end = action_start + num_actions
-        actions, states = self._load_parquet(episode_index, action_start, action_end)
+        actions, states_seq = self._load_parquet(episode_index, action_start, action_end)
+        state_current = states_seq[0]
 
         sample_frame_ids = None
         if frame_ids_t is not None:
@@ -319,7 +329,8 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         return {
             "video": video_cthw,                 # 模型读 "video"
             "actions": torch.from_numpy(actions).float(),
-            "states": torch.from_numpy(states).float(),
+            "states": torch.from_numpy(state_current).float(),
+            "states_seq": torch.from_numpy(states_seq).float(),
             "episode_index": episode_index,
             "pred_idx": pred_idx,
             "t5_text_embeddings": text_emb,      # 模型读 "t5_text_embeddings"
@@ -410,6 +421,22 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
         distributed_parallelism="fsdp",
     ),
     model=L(PrecomputedLatentVideo2WorldModel)(
+        action_head_enabled=bool(ACTION_HEAD_ENABLED),
+        action_loss_weight=ACTION_HEAD_LOSS_WEIGHT,
+        action_head_save_every=ACTION_HEAD_SAVE_EVERY,
+        action_head_save_dir=ACTION_HEAD_SAVE_DIR,
+        action_head_load_path=ACTION_HEAD_LOAD_PATH if ACTION_HEAD_LOAD_PATH else None,
+        action_head_cfg=dict(
+            action_dim=16,
+            num_actions=64,
+            d_model=256,
+            n_heads=8,
+            n_blocks=8,
+            delta_dim=16,
+            state_dim=16,
+            sigma_k=4.0,
+            dropout=0.0,
+        ),
         config=Video2WorldModelRectifiedFlowConfig(
             fsdp_shard_size=2,
             state_t=STATE_T,
