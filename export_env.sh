@@ -59,6 +59,7 @@ export ACTION_HEAD_NOISE_BETA_S="${ACTION_HEAD_NOISE_BETA_S:-0.999}"
 # delta_v 空间 token 下采样（0 表示不池化，完整保留 HxW）
 export ACTION_HEAD_DELTA_POOL_H="${ACTION_HEAD_DELTA_POOL_H:-0}"
 export ACTION_HEAD_DELTA_POOL_W="${ACTION_HEAD_DELTA_POOL_W:-0}"
+export ACTION_HEAD_ACTIONS_PER_LATENT="${ACTION_HEAD_ACTIONS_PER_LATENT:-8}"
 export ACTION_HEAD_SAVE_EVERY="${ACTION_HEAD_SAVE_EVERY:-500}"
 export ACTION_HEAD_SAVE_DIR="${ACTION_HEAD_SAVE_DIR:-/home/jwhe/linyihan/robot_posttrain/action_head_ckpt}"
 # 可选：加载已有 action head 参数（仅 head，不影响 video ckpt）

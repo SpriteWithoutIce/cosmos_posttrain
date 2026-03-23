@@ -61,6 +61,7 @@ ACTION_HEAD_NOISE_BETA_BETA = float(os.environ.get("ACTION_HEAD_NOISE_BETA_BETA"
 ACTION_HEAD_NOISE_BETA_S = float(os.environ.get("ACTION_HEAD_NOISE_BETA_S", "0.999"))
 ACTION_HEAD_DELTA_POOL_H = int(os.environ.get("ACTION_HEAD_DELTA_POOL_H", "0"))
 ACTION_HEAD_DELTA_POOL_W = int(os.environ.get("ACTION_HEAD_DELTA_POOL_W", "0"))
+ACTION_HEAD_ACTIONS_PER_LATENT = int(os.environ.get("ACTION_HEAD_ACTIONS_PER_LATENT", "8"))
 ACTION_HEAD_SAVE_EVERY = int(os.environ.get("ACTION_HEAD_SAVE_EVERY", "500"))
 ACTION_HEAD_SAVE_DIR = os.environ.get(
     "ACTION_HEAD_SAVE_DIR",
@@ -518,6 +519,7 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
             dropout=0.0,
             delta_spatial_pool_h=ACTION_HEAD_DELTA_POOL_H,
             delta_spatial_pool_w=ACTION_HEAD_DELTA_POOL_W,
+            actions_per_latent=ACTION_HEAD_ACTIONS_PER_LATENT,
         ),
         config=Video2WorldModelRectifiedFlowConfig(
             fsdp_shard_size=2,
