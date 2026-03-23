@@ -176,18 +176,11 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
     @staticmethod
     def _extract_velocity_tensor(output_batch: dict) -> Tensor | None:
-        candidate_keys = (
-            "vt_pred_B_C_T_H_W",
-            "vt_pred",
-            "velocity_pred",
-            "pred_velocity",
-            "pred_v",
-            "net_output_B_C_T_H_W",
-        )
-        for key in candidate_keys:
-            val = output_batch.get(key, None)
-            if torch.is_tensor(val) and val.ndim == 5:
-                return val
+        # Per cosmos_predict2._src.predict2.models.text2world_model_rectified_flow.forward,
+        # RF velocity prediction is stored in output_batch["model_pred"].
+        v = output_batch.get("model_pred", None)
+        if torch.is_tensor(v) and v.ndim == 5:
+            return v
         return None
 
     def _compute_delta_v(self, output_batch: dict, num_cond: int, num_pred: int) -> Tensor:
@@ -199,9 +192,13 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                     sorted(list(output_batch.keys())),
                     flush=True,
                 )
+                tensor_items = []
+                for k, v in output_batch.items():
+                    if torch.is_tensor(v):
+                        tensor_items.append((k, tuple(v.shape), str(v.dtype)))
+                print("[action-head][debug] output tensors:", tensor_items, flush=True)
             raise KeyError(
-                "Cannot find predicted velocity tensor in output_batch. "
-                "Expected one of: vt_pred_B_C_T_H_W / vt_pred / velocity_pred / pred_velocity / pred_v."
+                "Cannot find predicted velocity tensor in output_batch['model_pred']."
             )
         # v_pred: [B, C, T, H, W] -> [B, T, C] via global spatial pooling.
         v_seq = v_pred.mean(dim=(-1, -2)).transpose(1, 2).contiguous()
