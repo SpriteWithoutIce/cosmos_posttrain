@@ -143,6 +143,8 @@ class ActionMIPHead(nn.Module):
         timestep_buckets: int = 1000,
         delta_spatial_pool_h: int = 0,
         delta_spatial_pool_w: int = 0,
+        delta_height: int = 60,
+        delta_width: int = 80,
         actions_per_latent: int = 8,
     ):
         super().__init__()
@@ -153,6 +155,8 @@ class ActionMIPHead(nn.Module):
         self.timestep_buckets = int(timestep_buckets)
         self.delta_spatial_pool_h = int(delta_spatial_pool_h)
         self.delta_spatial_pool_w = int(delta_spatial_pool_w)
+        self.delta_height = int(delta_height)
+        self.delta_width = int(delta_width)
         self.actions_per_latent = int(actions_per_latent)
 
         self.action_in = nn.Sequential(
@@ -160,8 +164,16 @@ class ActionMIPHead(nn.Module):
             nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
-        self.delta_encoder = nn.Sequential(
+        self.delta_encoder_vec = nn.Sequential(
             nn.Linear(self.delta_dim, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        )
+        flat_h = self.delta_spatial_pool_h if self.delta_spatial_pool_h > 0 else self.delta_height
+        flat_w = self.delta_spatial_pool_w if self.delta_spatial_pool_w > 0 else self.delta_width
+        self.delta_flat_dim = self.delta_dim * flat_h * flat_w
+        self.delta_encoder_flat = nn.Sequential(
+            nn.Linear(self.delta_flat_dim, d_model),
             nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
@@ -188,7 +200,7 @@ class ActionMIPHead(nn.Module):
 
     def _prepare_delta_tokens(self, delta_v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int, int]:
         # Returns:
-        #   delta_tokens_raw: [B, T*P, C] (P=tokens_per_frame)
+        #   delta_tokens_raw: [B, T, C] or [B, T, C*H*W]
         #   sigma_source: [B, T, C] for sigma gating
         #   num_frames: T
         #   tokens_per_frame: P
@@ -200,8 +212,7 @@ class ActionMIPHead(nn.Module):
         if delta_v.ndim != 5:
             raise ValueError(f"Unsupported delta_v shape: {tuple(delta_v.shape)}")
 
-        # Keep spatial information: [B, T, C, H, W] -> [B, T*P, C]
-        # where P is H*W or pooled_H*pooled_W.
+        # Flatten per frame: [B, T, C, H, W] -> [B, T, C*H*W]
         bsz, t, c, h, w = delta_v.shape
         if c != self.delta_dim:
             raise ValueError(f"Expected delta token dim={self.delta_dim}, got {c}")
@@ -212,9 +223,14 @@ class ActionMIPHead(nn.Module):
             x = x.reshape(bsz, t, c, self.delta_spatial_pool_h, self.delta_spatial_pool_w)
             h, w = self.delta_spatial_pool_h, self.delta_spatial_pool_w
         sigma_source = x.mean(dim=(-1, -2))  # [B, T, C], only for gating magnitude
-        tokens_per_frame = h * w
-        delta_tokens_raw = x.permute(0, 1, 3, 4, 2).reshape(bsz, t * tokens_per_frame, c).contiguous()
-        return delta_tokens_raw, sigma_source, t, tokens_per_frame
+        expected_flat = self.delta_dim * h * w
+        if expected_flat != self.delta_flat_dim:
+            raise ValueError(
+                f"Flattened delta dim mismatch: got C*H*W={expected_flat}, expected configured {self.delta_flat_dim}. "
+                f"Set delta_height/delta_width or pooling config correctly."
+            )
+        delta_tokens_raw = x.reshape(bsz, t, expected_flat).contiguous()
+        return delta_tokens_raw, sigma_source, t, 1
 
     def _compute_sigma(self, sigma_source: torch.Tensor, num_actions: int) -> torch.Tensor:
         # delta small -> sigma large; delta large -> sigma small.
@@ -291,7 +307,15 @@ class ActionMIPHead(nn.Module):
         delta_tokens_raw, sigma_source, num_frames, tokens_per_frame = self._prepare_delta_tokens(delta_v)
         if delta_tokens_raw.ndim != 3:
             raise ValueError(f"delta_tokens_raw must be [B,Lkv,C], got {tuple(delta_tokens_raw.shape)}")
-        delta_tokens = self.delta_encoder(delta_tokens_raw)
+        if delta_tokens_raw.shape[-1] == self.delta_dim:
+            delta_tokens = self.delta_encoder_vec(delta_tokens_raw)
+        elif delta_tokens_raw.shape[-1] == self.delta_flat_dim:
+            delta_tokens = self.delta_encoder_flat(delta_tokens_raw)
+        else:
+            raise ValueError(
+                f"Unsupported delta token last dim {delta_tokens_raw.shape[-1]}, "
+                f"expected {self.delta_dim} or {self.delta_flat_dim}"
+            )
         state_tokens = self.state_encoder(state_vec.unsqueeze(1))
         sigma = self._compute_sigma(sigma_source, num_actions=L)
 
