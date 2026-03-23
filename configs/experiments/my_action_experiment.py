@@ -409,7 +409,7 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
     ),
     model=L(PrecomputedLatentVideo2WorldModel)(
         config=Video2WorldModelRectifiedFlowConfig(
-            fsdp_shard_size=8,
+            fsdp_shard_size=4,
             state_t=STATE_T,
             text_encoder_config=None,  # 使用预计算 text_emb，不在线加载 reason1
             tokenizer=L(IdentityLatentTokenizer)(
