@@ -18,7 +18,7 @@
 - 读取 batch 中：
   - `actions: [B, 64, 16]`
   - `states: [B, 16]`
-- 从模型输出 `output_batch` 中提取 velocity 预测（优先 key: `vt_pred_B_C_T_H_W`）。
+- 从模型输出 `output_batch["model_pred"]` 提取 velocity 预测（与 cosmos rectified-flow forward 对齐）。
 - 空间池化得到每帧 16 维速度向量后，按 `4 cond + 8 pred` 计算 `delta_v`：
   - `delta_v[t] = v[t] - v[t-1]`，共 8 个。
 - MIP 双前向：
@@ -54,6 +54,38 @@
   - `action_loss / video_loss / total_loss`
   - `metrics/action_loss / metrics/video_loss / metrics/total_loss`
 
+6. action/state q01-q99 归一化
+- 在 `LeRobotLatentDataset` 中优先读取全局 `stats.json`（`ACTION_STATE_GLOBAL_STATS_JSON`）：
+  - `action.q01/q99`
+  - `observation.state.q01/q99`
+- 若未配置全局路径，则回退读取每个 task 的 `meta/stats.json`。
+- 返回给模型的 `actions / states / states_seq` 会先映射到 `[-1, 1]`：
+  - `norm = 2*(x-q01)/(q99-q01+eps)-1`
+- 支持裁剪（默认 `[-1, 1]`）防止极端值放大 loss。
+- 归一化由环境变量控制：
+  - `ACTION_STATE_USE_QNORM`
+  - `ACTION_STATE_NORM_CLIP`
+  - `ACTION_STATE_GLOBAL_STATS_JSON`
+
+7. Action Head 升级为 DiT 风格（参考 reasoningVLA）
+- `models/action_head.py` 重构为 timestep-aware 的 DiT 样式：
+  - sinusoidal timestep embedding + MLP
+  - AdaLayerNorm 调制
+  - 每个 block: `1x self-attn + 3x delta cross-attn + 1x state cross-attn + FFN`
+  - state 分支保留 sigma 门控
+- 训练时使用 `output_batch["timesteps"]` 作为 action head 的 timestep 条件。
+  （已进一步改为可独立采样，见第 8 条）
+
+8. 双时间步机制（按你的新需求）
+- video 主分支：继续使用原始随机 RF 时间步训练 video loss。
+- action 的 `delta_v` 分支：支持固定视频采样时间步 `ACTION_DELTA_VIDEO_T`（例如 0.5）：
+  - 额外构造 fixed-t 的 `xt` 并调用一次 `denoise` 得到 velocity
+  - 用该 velocity 计算 8 个 `delta_v`
+  - 这条分支保留梯度，`action_loss` 仍可更新 video model 参数
+- action head 的 timestep 与 video timestep 解耦：
+  - `ACTION_HEAD_TIMESTEP_MODE=random`：独立随机
+  - `ACTION_HEAD_TIMESTEP_MODE=fixed`：固定 `ACTION_HEAD_FIXED_TIMESTEP`
+
 ## 环境变量
 在 `export_env.sh` 新增：
 - `ACTION_HEAD_ENABLED`
@@ -63,3 +95,9 @@
 - `ACTION_HEAD_LOAD_PATH`
 - `ACTION_HEAD_LOG_EVERY`
 - `ACTION_HEAD_WANDB_LOG`
+- `ACTION_DELTA_VIDEO_T`
+- `ACTION_HEAD_TIMESTEP_MODE`
+- `ACTION_HEAD_FIXED_TIMESTEP`
+- `ACTION_STATE_USE_QNORM`
+- `ACTION_STATE_NORM_CLIP`
+- `ACTION_STATE_GLOBAL_STATS_JSON`

@@ -15,6 +15,7 @@
 
 import os
 import time
+import json
 from pathlib import Path
 from collections import OrderedDict
 
@@ -50,12 +51,18 @@ OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "1"))
 OPEN_LOOP_GUIDANCE = float(os.environ.get("OPEN_LOOP_GUIDANCE", "0.0"))
 ACTION_HEAD_ENABLED = int(os.environ.get("ACTION_HEAD_ENABLED", "1"))
 ACTION_HEAD_LOSS_WEIGHT = float(os.environ.get("ACTION_HEAD_LOSS_WEIGHT", "1.0"))
+ACTION_DELTA_VIDEO_T = float(os.environ.get("ACTION_DELTA_VIDEO_T", "0.5"))
+ACTION_HEAD_TIMESTEP_MODE = os.environ.get("ACTION_HEAD_TIMESTEP_MODE", "random")
+ACTION_HEAD_FIXED_TIMESTEP = int(os.environ.get("ACTION_HEAD_FIXED_TIMESTEP", "0"))
 ACTION_HEAD_SAVE_EVERY = int(os.environ.get("ACTION_HEAD_SAVE_EVERY", "500"))
 ACTION_HEAD_SAVE_DIR = os.environ.get(
     "ACTION_HEAD_SAVE_DIR",
     "/home/jwhe/linyihan/robot_posttrain/action_head_ckpt",
 )
 ACTION_HEAD_LOAD_PATH = os.environ.get("ACTION_HEAD_LOAD_PATH", "")
+ACTION_STATE_USE_QNORM = int(os.environ.get("ACTION_STATE_USE_QNORM", "1"))
+ACTION_STATE_NORM_CLIP = float(os.environ.get("ACTION_STATE_NORM_CLIP", "1.0"))
+ACTION_STATE_GLOBAL_STATS_JSON = os.environ.get("ACTION_STATE_GLOBAL_STATS_JSON", "")
 
 # ★ 你的 post-train checkpoint
 PT_CKPT = os.environ.get(
@@ -117,6 +124,9 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         num_actions_per_latent: int = 8,
         action_dim: int = 16,
         data_split: str = "train",
+        normalize_action_state: bool = True,
+        action_state_norm_clip: float = 1.0,
+        global_stats_json: str = "",
     ):
         self.lerobot_root = Path(lerobot_root)
         self.latent_root = Path(latent_root)
@@ -126,6 +136,9 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         self.num_actions_per_latent = num_actions_per_latent
         self.action_dim = action_dim
         self.data_split = data_split
+        self.normalize_action_state = bool(normalize_action_state)
+        self.action_state_norm_clip = float(action_state_norm_clip)
+        self.global_stats_json = global_stats_json
 
         from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
         from lerobot.datasets.utils import get_episode_data_index
@@ -147,6 +160,11 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         self._debug_interval_sec = float(os.environ.get("LATENT_DATASET_DEBUG_INTERVAL", "0"))
         self._last_debug_ts = time.time()
         self._sample_counter = 0
+        self._action_q01 = None
+        self._action_q99 = None
+        self._state_q01 = None
+        self._state_q99 = None
+        self._load_qnorm_stats()
 
     @property
     def episodes(self):
@@ -251,6 +269,39 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
             return int(data["latent_num_frames"])
         return 0
 
+    def _load_qnorm_stats(self):
+        stats_fp = Path(self.global_stats_json) if self.global_stats_json else (self.lerobot_root / "meta" / "stats.json")
+        if not self.normalize_action_state or not stats_fp.exists():
+            return
+        try:
+            with open(stats_fp, "r", encoding="utf-8") as f:
+                stats = json.load(f)
+        except Exception:
+            return
+
+        action_stats = stats.get("action", None) or stats.get("actions", None)
+        state_stats = stats.get("observation.state", None) or stats.get("state", None) or stats.get("states", None)
+        if action_stats is None or state_stats is None:
+            return
+        if "q01" not in action_stats or "q99" not in action_stats:
+            return
+        if "q01" not in state_stats or "q99" not in state_stats:
+            return
+
+        self._action_q01 = torch.tensor(action_stats["q01"], dtype=torch.float32)
+        self._action_q99 = torch.tensor(action_stats["q99"], dtype=torch.float32)
+        self._state_q01 = torch.tensor(state_stats["q01"], dtype=torch.float32)
+        self._state_q99 = torch.tensor(state_stats["q99"], dtype=torch.float32)
+
+    def _qnorm(self, x: torch.Tensor, q01: torch.Tensor, q99: torch.Tensor) -> torch.Tensor:
+        eps = 1e-6
+        q01 = q01.to(device=x.device, dtype=x.dtype)
+        q99 = q99.to(device=x.device, dtype=x.dtype)
+        y = 2.0 * (x - q01) / (q99 - q01 + eps) - 1.0
+        if self.action_state_norm_clip > 0:
+            y = y.clamp(-self.action_state_norm_clip, self.action_state_norm_clip)
+        return y
+
     def __getitem__(self, idx: int):
         episode_index, pred_idx = self.sample_index[idx]
         self._sample_counter += 1
@@ -326,11 +377,19 @@ class LeRobotLatentDataset(torch.utils.data.Dataset):
         # Model expects video latent shape as (C, T, H, W) per sample.
         video_cthw = rearrange(final_latents, "t c h w -> c t h w").contiguous()
 
+        actions_t = torch.from_numpy(actions).float()
+        state_t = torch.from_numpy(state_current).float()
+        states_seq_t = torch.from_numpy(states_seq).float()
+        if self.normalize_action_state and self._action_q01 is not None and self._state_q01 is not None:
+            actions_t = self._qnorm(actions_t, self._action_q01, self._action_q99)
+            state_t = self._qnorm(state_t, self._state_q01, self._state_q99)
+            states_seq_t = self._qnorm(states_seq_t, self._state_q01, self._state_q99)
+
         return {
             "video": video_cthw,                 # 模型读 "video"
-            "actions": torch.from_numpy(actions).float(),
-            "states": torch.from_numpy(state_current).float(),
-            "states_seq": torch.from_numpy(states_seq).float(),
+            "actions": actions_t,
+            "states": state_t,
+            "states_seq": states_seq_t,
             "episode_index": episode_index,
             "pred_idx": pred_idx,
             "t5_text_embeddings": text_emb,      # 模型读 "t5_text_embeddings"
@@ -359,6 +418,9 @@ class MultiLeRobotLatentDataset(torch.utils.data.Dataset):
         num_actions_per_latent: int = 8,
         action_dim: int = 16,
         data_split: str = "train",
+        normalize_action_state: bool = True,
+        action_state_norm_clip: float = 1.0,
+        global_stats_json: str = "",
     ):
         self.datasets = []
         self.acc_offsets = [0]
@@ -377,6 +439,9 @@ class MultiLeRobotLatentDataset(torch.utils.data.Dataset):
                     num_actions_per_latent=num_actions_per_latent,
                     action_dim=action_dim,
                     data_split=data_split,
+                    normalize_action_state=normalize_action_state,
+                    action_state_norm_clip=action_state_norm_clip,
+                    global_stats_json=global_stats_json,
                 )
                 if len(dset) == 0:
                     continue
@@ -423,6 +488,9 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
     model=L(PrecomputedLatentVideo2WorldModel)(
         action_head_enabled=bool(ACTION_HEAD_ENABLED),
         action_loss_weight=ACTION_HEAD_LOSS_WEIGHT,
+        action_delta_video_t=ACTION_DELTA_VIDEO_T,
+        action_head_timestep_mode=ACTION_HEAD_TIMESTEP_MODE,
+        action_head_fixed_timestep=ACTION_HEAD_FIXED_TIMESTEP,
         action_head_save_every=ACTION_HEAD_SAVE_EVERY,
         action_head_save_dir=ACTION_HEAD_SAVE_DIR,
         action_head_load_path=ACTION_HEAD_LOAD_PATH if ACTION_HEAD_LOAD_PATH else None,
@@ -549,6 +617,9 @@ _lerobot_train_dataset = L(MultiLeRobotLatentDataset)(
     num_actions_per_latent=8,
     action_dim=ACTION_DIM,
     data_split="train",
+    normalize_action_state=bool(ACTION_STATE_USE_QNORM),
+    action_state_norm_clip=ACTION_STATE_NORM_CLIP,
+    global_stats_json=ACTION_STATE_GLOBAL_STATS_JSON,
 )
 
 _lerobot_val_dataset = L(MultiLeRobotLatentDataset)(
@@ -560,6 +631,9 @@ _lerobot_val_dataset = L(MultiLeRobotLatentDataset)(
     num_actions_per_latent=8,
     action_dim=ACTION_DIM,
     data_split="test",
+    normalize_action_state=bool(ACTION_STATE_USE_QNORM),
+    action_state_norm_clip=ACTION_STATE_NORM_CLIP,
+    global_stats_json=ACTION_STATE_GLOBAL_STATS_JSON,
 )
 
 lerobot_eef_50_train_dataloader = L(CompatibleDataLoader)(
