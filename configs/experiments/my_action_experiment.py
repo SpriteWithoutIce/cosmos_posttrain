@@ -35,18 +35,18 @@ from models.precomputed_latent import IdentityLatentTokenizer, PrecomputedLatent
 # =============================================================================
 LEROBOT_ROOT = os.environ.get(
     "LEROBOT_ROOT",
-    "/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_test"
+    "/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50"
 )
 LATENT_ROOT = os.environ.get(
     "LATENT_ROOT",
-    "/home/jwhe/linyihan/datasets/lerobot_latents_test"
+    "/home/jwhe/linyihan/datasets/lerobot_latents"
 )
 COSMOS_TOKENIZER = os.environ.get(
     "COSMOS_TOKENIZER",
     "/home/jwhe/linyihan/cosmos/tokenizer.pth",
 )
-OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "100"))
-OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "10"))
+OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "200"))
+OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "1"))
 OPEN_LOOP_GUIDANCE = float(os.environ.get("OPEN_LOOP_GUIDANCE", "0.0"))
 
 # ★ 你的 post-train checkpoint
@@ -411,7 +411,7 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
     ),
     model=L(PrecomputedLatentVideo2WorldModel)(
         config=Video2WorldModelRectifiedFlowConfig(
-            fsdp_shard_size=4,
+            fsdp_shard_size=2,
             state_t=STATE_T,
             text_encoder_config=None,  # 使用预计算 text_emb，不在线加载 reason1
             tokenizer=L(IdentityLatentTokenizer)(
