@@ -5,7 +5,10 @@ from torch import Tensor
 
 from cosmos_predict2._src.predict2.conditioner import DataType
 from cosmos_predict2._src.predict2.configs.video2world.defaults.conditioner import Video2WorldCondition
-from cosmos_predict2._src.predict2.models.video2world_model_rectified_flow import Video2WorldModelRectifiedFlow
+from cosmos_predict2._src.predict2.models.video2world_model_rectified_flow import (
+    NUM_CONDITIONAL_FRAMES_KEY,
+    Video2WorldModelRectifiedFlow,
+)
 
 
 class IdentityLatentTokenizer(torch.nn.Module):
@@ -55,15 +58,11 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
         condition = self.conditioner(data_batch)
         condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
-
-        # For video mode, we need to set gt_frames for the denoise function
-        if not is_image_batch and isinstance(condition, Video2WorldCondition):
-            condition = condition.set_video_condition(
-                gt_frames=latent_state,
-                random_min_num_conditional_frames=self.config.min_num_conditional_frames,
-                random_max_num_conditional_frames=self.config.max_num_conditional_frames,
-                num_conditional_frames=data_batch.get("num_conditional_frames", None),
-                conditional_frames_probs=self.config.conditional_frames_probs,
-            )
-
+        condition = condition.set_video_condition(
+            gt_frames=latent_state.to(**self.tensor_kwargs),
+            random_min_num_conditional_frames=self.config.min_num_conditional_frames,
+            random_max_num_conditional_frames=self.config.max_num_conditional_frames,
+            num_conditional_frames=data_batch.get(NUM_CONDITIONAL_FRAMES_KEY, None),
+            conditional_frames_probs=self.config.conditional_frames_probs,
+        )
         return latent_state, latent_state, condition
