@@ -390,13 +390,14 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             )
             self._action_head_debug_printed = True
 
-        action_t_cont, action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
+        action_t2_cont, action_t2 = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
+        action_t1 = torch.zeros_like(action_t2)
         noise = torch.randn_like(actions)
         z1 = noise
         z2 = self.action_head_mip_gt_mix * actions + (1.0 - self.action_head_mip_gt_mix) * noise
 
-        pred1 = self.action_head(z1, delta_v, states, timestep=action_t)
-        pred2 = self.action_head(z2, delta_v, states, timestep=action_t)
+        pred1 = self.action_head(z1, delta_v, states, timestep=action_t1)
+        pred2 = self.action_head(z2, delta_v, states, timestep=action_t2)
 
         action_loss_1 = F.mse_loss(pred1, actions)
         action_loss_2 = F.mse_loss(pred2, actions)
@@ -413,7 +414,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         output_batch["metrics/action_loss"] = output_batch["action_loss"]
         output_batch["metrics/video_loss"] = output_batch["video_loss"]
         output_batch["metrics/total_loss"] = output_batch["total_loss"]
-        # output_batch["metrics/action_timestep_mean"] = action_t_cont.detach().mean()
+        output_batch["metrics/action_timestep_mean"] = action_t2_cont.detach().mean()
 
         if self._is_rank0() and self._action_head_log_every > 0 and iteration % self._action_head_log_every == 0:
             print(
@@ -423,7 +424,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                     f"action_loss_1={float(action_loss_1.detach().item()):.6f} "
                     f"action_loss_2={float(action_loss_2.detach().item()):.6f} "
                     f"action_loss={float(action_loss.detach().item()):.6f} "
-                    # f"action_t={float(action_t_cont.detach().mean().item()):.4f} "
+                    f"action_t2={float(action_t2_cont.detach().mean().item()):.4f} "
                     f"total_loss={float(total_loss.detach().item()):.6f}"
                 ),
                 flush=True,
@@ -439,7 +440,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                                 "train/action_loss_1": float(action_loss_1.detach().item()),
                                 "train/action_loss_2": float(action_loss_2.detach().item()),
                                 "train/action_loss": float(action_loss.detach().item()),
-                                # "train/action_timestep_mean": float(action_t_cont.detach().mean().item()),
+                                "train/action_timestep_mean": float(action_t2_cont.detach().mean().item()),
                                 "train/total_loss": float(total_loss.detach().item()),
                             },
                             step=int(iteration),
