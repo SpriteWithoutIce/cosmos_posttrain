@@ -393,7 +393,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         action_t_cont, action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
         noise = torch.randn_like(actions)
         z1 = noise
-        z2 = self.action_head_mip_gt_mix * actions + noise
+        z2 = self.action_head_mip_gt_mix * actions + noise * (1 - self.action_head_mip_gt_mix)
 
         pred1 = self.action_head(z1, delta_v, states, timestep=action_t)
         pred2 = self.action_head(z2, delta_v, states, timestep=action_t)
