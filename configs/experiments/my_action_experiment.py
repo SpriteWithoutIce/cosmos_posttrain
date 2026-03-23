@@ -436,7 +436,7 @@ my_video_experiment = LazyDict(
             save_iter=500,
             load_path=PT_CKPT,
             load_training_state=False,
-            strict_resume=False,
+            strict_resume=True,
             load_from_object_store=dict(enabled=False),
             save_to_object_store=dict(enabled=False),
         ),
