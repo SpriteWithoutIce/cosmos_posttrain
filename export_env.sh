@@ -51,6 +51,7 @@ export ACTION_HEAD_LOSS_WEIGHT="${ACTION_HEAD_LOSS_WEIGHT:-1.0}"
 export ACTION_DELTA_VIDEO_T="${ACTION_DELTA_VIDEO_T:-0.5}"
 export ACTION_HEAD_TIMESTEP_MODE="${ACTION_HEAD_TIMESTEP_MODE:-beta}"  # beta / random / fixed
 export ACTION_HEAD_FIXED_TIMESTEP="${ACTION_HEAD_FIXED_TIMESTEP:-0}"
+export ACTION_HEAD_MIP_GT_MIX="${ACTION_HEAD_MIP_GT_MIX:-0.9}"
 export ACTION_HEAD_NOISE_BETA_ALPHA="${ACTION_HEAD_NOISE_BETA_ALPHA:-1.5}"
 export ACTION_HEAD_NOISE_BETA_BETA="${ACTION_HEAD_NOISE_BETA_BETA:-1.0}"
 export ACTION_HEAD_NOISE_BETA_S="${ACTION_HEAD_NOISE_BETA_S:-0.999}"
@@ -63,4 +64,9 @@ export ACTION_HEAD_WANDB_LOG="${ACTION_HEAD_WANDB_LOG:-1}"
 export ACTION_STATE_USE_QNORM="${ACTION_STATE_USE_QNORM:-1}"
 export ACTION_STATE_NORM_CLIP="${ACTION_STATE_NORM_CLIP:-1.0}"
 # 只读一个全局 stats.json（包含所有 task 的 action/state q01/q99）
-export ACTION_STATE_GLOBAL_STATS_JSON="${ACTION_STATE_GLOBAL_STATS_JSON:-/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50/meta/stats.json}"
+export ACTION_STATE_GLOBAL_STATS_JSON="${ACTION_STATE_GLOBAL_STATS_JSON:-/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50/stats.json}"
+
+# ── Video 初始化权重（DCP 目录）──────────────────────────────────────────────
+export CHECKPOINT_LOAD_PATH="${CHECKPOINT_LOAD_PATH:-/home/jwhe/linyihan/robot_posttrain/open_loop/cosmos_diffusion_v2/robot_posttrain/my_video_experiment_20260323_133123/checkpoints/iter_000010000}"
+export CHECKPOINT_LOAD_TRAINING_STATE="${CHECKPOINT_LOAD_TRAINING_STATE:-False}"
+export CHECKPOINT_STRICT_RESUME="${CHECKPOINT_STRICT_RESUME:-True}"
