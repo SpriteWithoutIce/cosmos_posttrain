@@ -12,13 +12,30 @@ from cosmos_predict2._src.predict2.models.video2world_model_rectified_flow impor
 
 
 class IdentityLatentTokenizer(torch.nn.Module):
-    """Lightweight tokenizer interface for precomputed latent training."""
+    """Identity encoder with optional real VAE decoder for visualization callbacks."""
 
-    def __init__(self, latent_ch: int = 16, spatial_compression_factor: int = 8, name: str = "identity_latent_tokenizer"):
+    def __init__(
+        self,
+        latent_ch: int = 16,
+        spatial_compression_factor: int = 8,
+        name: str = "identity_latent_tokenizer",
+        enable_decode: bool = False,
+        vae_pth: str | None = None,
+        temporal_window: int = 16,
+    ):
         super().__init__()
         self._latent_ch = latent_ch
         self._spatial_compression_factor = spatial_compression_factor
         self.name = name
+        self._decoder = None
+
+        if enable_decode:
+            from cosmos_predict2._src.predict2.tokenizers.wan2pt1 import Wan2pt1VAEInterface
+
+            decoder_kwargs = {"temporal_window": temporal_window}
+            if vae_pth:
+                decoder_kwargs["vae_pth"] = vae_pth
+            self._decoder = Wan2pt1VAEInterface(**decoder_kwargs)
 
     @property
     def latent_ch(self) -> int:
@@ -28,13 +45,22 @@ class IdentityLatentTokenizer(torch.nn.Module):
         return state
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
-        return latent
+        if self._decoder is None:
+            raise RuntimeError(
+                "IdentityLatentTokenizer.decode() requested but decoder is disabled. "
+                "Set enable_decode=True and provide vae_pth."
+            )
+        return self._decoder.decode(latent)
 
     def get_latent_num_frames(self, num_pixel_frames: int) -> int:
-        return num_pixel_frames
+        if self._decoder is None:
+            return num_pixel_frames
+        return self._decoder.get_latent_num_frames(num_pixel_frames)
 
     def get_pixel_num_frames(self, num_latent_frames: int) -> int:
-        return num_latent_frames
+        if self._decoder is None:
+            return num_latent_frames
+        return self._decoder.get_pixel_num_frames(num_latent_frames)
 
     @property
     def spatial_compression_factor(self) -> int:

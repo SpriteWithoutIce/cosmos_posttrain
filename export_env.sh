@@ -41,5 +41,6 @@ export TOKENIZERS_PARALLELISM=false
 export COSMOS_INTERNAL=0
 export CUDA_MODULE_LOADING=LAZY
 
-# 禁用 wandb / S3（调试阶段建议）
-export WANDB_MODE=disabled
+# wandb 模式（disabled / offline / online）
+export WANDB_MODE="${WANDB_MODE:-disabled}"
+export JOB_WANDB_MODE="${JOB_WANDB_MODE:-$WANDB_MODE}"

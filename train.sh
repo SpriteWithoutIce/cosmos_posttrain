@@ -16,6 +16,7 @@ CONFIG="${1:-configs/config.py}"
 NPROC="${NPROC:-1}"                          # GPU 数量，单卡用 1
 MASTER_PORT="${MASTER_PORT:-12341}"
 MAX_ITERS="${MAX_ITERS:-1000}"              # 调试阶段设小，正式训练设大
+JOB_WANDB_MODE="${JOB_WANDB_MODE:-disabled}"
 
 EXP_NAME="my_video_experiment"              # 与 configs/experiments/my_action_experiment.py 中注册名一致
 
@@ -31,5 +32,5 @@ torchrun \
     trainer.logging_iter=50 \
     trainer.validation_iter=200 \
     checkpoint.save_iter=500 \
-    job.wandb_mode=disabled \
+    job.wandb_mode=${JOB_WANDB_MODE} \
     job.name=${EXP_NAME}_$(date +%Y%m%d_%H%M%S)

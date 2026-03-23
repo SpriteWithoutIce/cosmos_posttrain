@@ -41,6 +41,11 @@ LATENT_ROOT = os.environ.get(
     "LATENT_ROOT",
     "/home/jwhe/linyihan/datasets/lerobot_latents_test"
 )
+COSMOS_TOKENIZER = os.environ.get(
+    "COSMOS_TOKENIZER",
+    "/home/jwhe/linyihan/cosmos/tokenizer.pth",
+)
+OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "100"))
 
 # ★ 你的 post-train checkpoint
 PT_CKPT = os.environ.get(
@@ -407,7 +412,13 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
             fsdp_shard_size=8,
             state_t=STATE_T,
             text_encoder_config=None,  # 使用预计算 text_emb，不在线加载 reason1
-            tokenizer=L(IdentityLatentTokenizer)(latent_ch=16, spatial_compression_factor=8),
+            tokenizer=L(IdentityLatentTokenizer)(
+                latent_ch=16,
+                spatial_compression_factor=8,
+                enable_decode=True,
+                vae_pth=COSMOS_TOKENIZER,
+                temporal_window=16,
+            ),
         ),
         _recursive_=False,
     ),
@@ -453,10 +464,10 @@ my_video_experiment = LazyDict(
             validation_iter=500,
             callbacks=dict(
                 every_n_sample_reg=dict(
-                    every_n=2000, do_x0_prediction=False, guidance=[0], fps=16, save_s3=False,
+                    every_n=OPEN_LOOP_SAMPLE_EVERY, do_x0_prediction=False, guidance=[0], fps=16, save_s3=False,
                 ),
                 every_n_sample_ema=dict(
-                    every_n=2000, do_x0_prediction=False, guidance=[0], fps=16, save_s3=False,
+                    every_n=OPEN_LOOP_SAMPLE_EVERY, do_x0_prediction=False, guidance=[0], fps=16, save_s3=False,
                 ),
                 heart_beat=dict(save_s3=False),
                 iter_speed=dict(hit_thres=100, save_s3=False),
