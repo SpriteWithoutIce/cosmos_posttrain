@@ -96,6 +96,8 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         self.action_head = None
         self._action_head_debug = os.environ.get("ACTION_HEAD_DEBUG", "0") == "1"
         self._action_head_debug_printed = False
+        self._action_head_log_every = int(os.environ.get("ACTION_HEAD_LOG_EVERY", "50"))
+        self._action_head_wandb_log = os.environ.get("ACTION_HEAD_WANDB_LOG", "1") == "1"
         if self.action_head_enabled:
             cfg = dict(action_head_cfg or {})
             self.action_head = ActionMIPHead(**cfg)
@@ -280,6 +282,35 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         output_batch["action_loss"] = action_loss.detach()
         output_batch["video_loss"] = loss.detach()
         output_batch["total_loss"] = total_loss.detach()
+        output_batch["metrics/action_loss"] = output_batch["action_loss"]
+        output_batch["metrics/video_loss"] = output_batch["video_loss"]
+        output_batch["metrics/total_loss"] = output_batch["total_loss"]
+
+        if self._is_rank0() and self._action_head_log_every > 0 and iteration % self._action_head_log_every == 0:
+            print(
+                (
+                    f"[action-head] iter={iteration} "
+                    f"video_loss={float(loss.detach().item()):.6f} "
+                    f"action_loss={float(action_loss.detach().item()):.6f} "
+                    f"total_loss={float(total_loss.detach().item()):.6f}"
+                ),
+                flush=True,
+            )
+            if self._action_head_wandb_log:
+                try:
+                    import wandb  # type: ignore
+
+                    if wandb.run is not None:
+                        wandb.log(
+                            {
+                                "train/video_loss": float(loss.detach().item()),
+                                "train/action_loss": float(action_loss.detach().item()),
+                                "train/total_loss": float(total_loss.detach().item()),
+                            },
+                            step=int(iteration),
+                        )
+                except Exception:
+                    pass
 
         self._maybe_save_action_head(iteration=iteration)
         return output_batch, total_loss

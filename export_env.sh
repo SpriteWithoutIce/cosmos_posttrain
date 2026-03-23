@@ -52,3 +52,5 @@ export ACTION_HEAD_SAVE_EVERY="${ACTION_HEAD_SAVE_EVERY:-1000}"
 export ACTION_HEAD_SAVE_DIR="${ACTION_HEAD_SAVE_DIR:-/home/jwhe/linyihan/robot_posttrain/action_head_ckpt}"
 # 可选：加载已有 action head 参数（仅 head，不影响 video ckpt）
 export ACTION_HEAD_LOAD_PATH="${ACTION_HEAD_LOAD_PATH:-}"
+export ACTION_HEAD_LOG_EVERY="${ACTION_HEAD_LOG_EVERY:-50}"
+export ACTION_HEAD_WANDB_LOG="${ACTION_HEAD_WANDB_LOG:-1}"
