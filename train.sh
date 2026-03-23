@@ -7,6 +7,7 @@ set -e
 # 加载环境变量
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/export_env.sh"
+mkdir -p "${IMAGINAIRE_OUTPUT_ROOT}"
 
 # ★ 添加 cosmos-predict2.5 到 PYTHONPATH（可通过 COSMOS_PREDICT2_ROOT 覆盖）
 export COSMOS_PREDICT2_ROOT="${COSMOS_PREDICT2_ROOT:-/home/jwhe/linyihan/cosmos-predict2.5}"

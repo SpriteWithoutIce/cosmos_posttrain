@@ -70,6 +70,12 @@ class IdentityLatentTokenizer(torch.nn.Module):
 class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
     """Video2World model variant that consumes precomputed latents directly."""
 
+    def _normalize_video_databatch_inplace(self, data_batch: dict[str, Tensor], input_key: str = None) -> None:
+        # Sampling callbacks call this before generation. For latent-direct training,
+        # the "video" tensor is already latent, not uint8 pixels.
+        del input_key
+        return
+
     def get_data_and_condition(
         self, data_batch: dict[str, torch.Tensor]
     ) -> tuple[Tensor, Tensor, Video2WorldCondition]:
@@ -81,6 +87,11 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
         # Precomputed latents are already model-ready; skip normalization and VAE encoding.
         latent_state = data_batch[input_key].to(**self.tensor_kwargs).contiguous().float()
+        raw_state = latent_state
+        # EveryNDrawSample stacks generated sample with raw_data for visualization.
+        # Decode raw latents only in no-grad context (sampling callbacks) to avoid training overhead.
+        if not torch.is_grad_enabled():
+            raw_state = self.decode(latent_state).contiguous().float()
 
         condition = self.conditioner(data_batch)
         condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
@@ -91,4 +102,4 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             num_conditional_frames=data_batch.get(NUM_CONDITIONAL_FRAMES_KEY, None),
             conditional_frames_probs=self.config.conditional_frames_probs,
         )
-        return latent_state, latent_state, condition
+        return raw_state, latent_state, condition

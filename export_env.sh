@@ -24,7 +24,7 @@ export LEROBOT_ROOT="${LEROBOT_ROOT:-${DATASET_ROOT}}"
 export LATENT_ROOT="${LATENT_ROOT:-/home/jwhe/linyihan/datasets/lerobot_latents_test}"
 
 # ── 训练输出根目录 ────────────────────────────────────────────────────────────
-export IMAGINAIRE_OUTPUT_ROOT="${IMAGINAIRE_OUTPUT_ROOT:-/tmp/imaginaire4-output}"
+export IMAGINAIRE_OUTPUT_ROOT="${IMAGINAIRE_OUTPUT_ROOT:-/home/jwhe/linyihan/robot_posttrain/open_loop}"
 
 # ── HuggingFace Token（如需下载受限 ckpt）────────────────────────────────────
 # export HF_TOKEN="your_hf_token_here"
