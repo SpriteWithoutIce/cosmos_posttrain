@@ -95,9 +95,17 @@
   - `z2 = (1-t)*noise + t*action`
   - `t` 为 action head 独立采样时间（Beta/Random/Fixed）
 
+9. 分组学习率（video / action expert 分开）
+- 在 `PrecomputedLatentVideo2WorldModel.init_optimizer_scheduler` 中改为 2 个 param group：
+  - group0: `self.net`（video 主干），使用原配置 `optimizer.lr`
+  - group1: `self.action_head`，使用 `ACTION_HEAD_LR`（默认 `1e-4`）
+- 两组共享 `weight_decay`、`betas`、`eps`，优化器类型沿用配置（`fusedadam` / `adamw`）。
+- wandb 的 `optim/lr_0`、`optim/lr_1` 会分别显示两组学习率。
+
 ## 环境变量
 在 `export_env.sh` 新增：
 - `ACTION_HEAD_ENABLED`
+- `ACTION_HEAD_LR`
 - `ACTION_HEAD_LOSS_WEIGHT`
 - `ACTION_HEAD_SAVE_EVERY`
 - `ACTION_HEAD_SAVE_DIR`

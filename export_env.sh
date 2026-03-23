@@ -47,6 +47,7 @@ export JOB_WANDB_MODE="${JOB_WANDB_MODE:-$WANDB_MODE}"
 
 # ── Action Head 训练配置 ─────────────────────────────────────────────────────
 export ACTION_HEAD_ENABLED="${ACTION_HEAD_ENABLED:-1}"
+export ACTION_HEAD_LR="${ACTION_HEAD_LR:-1e-4}"
 export ACTION_HEAD_LOSS_WEIGHT="${ACTION_HEAD_LOSS_WEIGHT:-1.0}"
 export ACTION_DELTA_VIDEO_T="${ACTION_DELTA_VIDEO_T:-0.5}"
 export ACTION_HEAD_TIMESTEP_MODE="${ACTION_HEAD_TIMESTEP_MODE:-beta}"  # beta / random / fixed

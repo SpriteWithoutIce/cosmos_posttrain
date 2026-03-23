@@ -50,6 +50,7 @@ OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "200"))
 OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "1"))
 OPEN_LOOP_GUIDANCE = float(os.environ.get("OPEN_LOOP_GUIDANCE", "0.0"))
 ACTION_HEAD_ENABLED = int(os.environ.get("ACTION_HEAD_ENABLED", "1"))
+ACTION_HEAD_LR = float(os.environ.get("ACTION_HEAD_LR", "1e-4"))
 ACTION_HEAD_LOSS_WEIGHT = float(os.environ.get("ACTION_HEAD_LOSS_WEIGHT", "1.0"))
 ACTION_DELTA_VIDEO_T = float(os.environ.get("ACTION_DELTA_VIDEO_T", "0.5"))
 ACTION_HEAD_TIMESTEP_MODE = os.environ.get("ACTION_HEAD_TIMESTEP_MODE", "beta")
@@ -491,6 +492,7 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
     ),
     model=L(PrecomputedLatentVideo2WorldModel)(
         action_head_enabled=bool(ACTION_HEAD_ENABLED),
+        action_head_lr=ACTION_HEAD_LR,
         action_loss_weight=ACTION_HEAD_LOSS_WEIGHT,
         action_delta_video_t=ACTION_DELTA_VIDEO_T,
         action_head_timestep_mode=ACTION_HEAD_TIMESTEP_MODE,
