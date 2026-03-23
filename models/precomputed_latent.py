@@ -168,12 +168,12 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             return sd
         return {k: v for k, v in sd.items() if not k.startswith("action_head.")}
 
-    def load_state_dict(self, state_dict, strict: bool = True):
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False, **kwargs):
         if not self.action_head_enabled:
-            return super().load_state_dict(state_dict, strict=strict)
+            return super().load_state_dict(state_dict, strict=strict, assign=assign, **kwargs)
 
         # Keep video checkpoint strictness while allowing action_head to be absent.
-        result = super().load_state_dict(state_dict, strict=False)
+        result = super().load_state_dict(state_dict, strict=False, assign=assign, **kwargs)
         if strict:
             missing = [k for k in result.missing_keys if not k.startswith("action_head.")]
             unexpected = [k for k in result.unexpected_keys if not k.startswith("action_head.")]
