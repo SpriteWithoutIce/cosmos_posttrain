@@ -139,3 +139,27 @@
   - `models/action_head.py::_compute_state_sigma` 改为始终输出 3D gate：`[B,L,1]`。
   - 增加 shape assert：在 `ActionMIPHead.forward` / `ActionDiTBlock.forward` 对 `x/delta_tokens/state_tokens/sigma` 做 3D 检查，提前报错避免静默广播。
 - 影响：仅修复 action head 内部张量形状，不改 ckpt key 命名，不影响既有 video ckpt 加载兼容性。
+
+11. 对齐 action_expert 原理（2026-03-23）
+- `models/action_head.py` 重构为与 `action_expert.py` 同机制：
+  - `1x causal self-attn + 3x causal delta_v cross-attn + 1x causal state cross-attn + FFN`
+  - 使用显式 causal mask：
+    - self mask: 动作 token 标准因果
+    - delta_v cross mask: token `j` 只能看 `0..j//actions_per_latent`
+    - state cross mask: tokenwise causal
+  - `sigma` 门控由 `delta_v` 幅值计算并按 `actions_per_latent` 展开到 action token 级。
+- `delta_v` 对齐方式改为 frame-level（`[B,T,C]`），若输入是 `[B,T,C,H,W]` 则先做空间平均（可选先池化再平均）。
+- 新增配置：`ACTION_HEAD_ACTIONS_PER_LATENT`（默认 `8`）。
+
+12. 修复 MIP 第二路输入与总损失（2026-03-23）
+- `models/precomputed_latent.py`：
+  - `z2` 改为 `z2 = m * gt + (1 - m) * noise`（`m=ACTION_HEAD_MIP_GT_MIX`）
+  - `action_loss` 改为 `action_loss_1 + action_loss_2`（不再除以 2）
+
+13. 取消 delta_v 的 frame mean（2026-03-23）
+- 根据需求，`delta_v` 不再在 cross-attn 前做 `H/W mean`。
+- `models/action_head.py` 现在对 5D `delta_v` 使用空间 token：
+  - `[B,T,C,H,W] -> [B, T*(H*W), C]`（若配置池化则为 `T*(pool_h*pool_w)`）
+- delta cross-attn 的因果掩码改为按“帧分组解锁”：
+  - 第 `j` 个 action token 仅可访问前 `floor(j/actions_per_latent)+1` 帧对应的全部空间 token。
+- `sigma` 门控仍基于帧级幅值计算（用于稳定 state 分支权重）。
