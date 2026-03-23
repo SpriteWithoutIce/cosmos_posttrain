@@ -47,7 +47,7 @@ export JOB_WANDB_MODE="${JOB_WANDB_MODE:-$WANDB_MODE}"
 
 # ── Action Head 训练配置 ─────────────────────────────────────────────────────
 export ACTION_HEAD_ENABLED="${ACTION_HEAD_ENABLED:-1}"
-export ACTION_HEAD_LR="${ACTION_HEAD_LR:-1e-3}"
+export ACTION_HEAD_LR="${ACTION_HEAD_LR:-1e-4}"
 export ACTION_HEAD_LOSS_WEIGHT="${ACTION_HEAD_LOSS_WEIGHT:-1.0}"
 export ACTION_DELTA_VIDEO_T="${ACTION_DELTA_VIDEO_T:-0.5}"
 export ACTION_HEAD_TIMESTEP_MODE="${ACTION_HEAD_TIMESTEP_MODE:-fixed}"  # beta / random / fixed
@@ -77,4 +77,4 @@ export ACTION_STATE_GLOBAL_STATS_JSON="${ACTION_STATE_GLOBAL_STATS_JSON:-/home/j
 export CHECKPOINT_LOAD_PATH="${CHECKPOINT_LOAD_PATH:-/home/jwhe/linyihan/robot_posttrain/open_loop/cosmos_diffusion_v2/robot_posttrain/my_video_experiment_20260323_133123/checkpoints/iter_000010000}"
 export CHECKPOINT_LOAD_TRAINING_STATE="${CHECKPOINT_LOAD_TRAINING_STATE:-False}"
 export CHECKPOINT_STRICT_RESUME="${CHECKPOINT_STRICT_RESUME:-True}"
-export GRAD_ACCUM_ITER="${GRAD_ACCUM_ITER:-1}"
+export GRAD_ACCUM_ITER="${GRAD_ACCUM_ITER:-8}"
