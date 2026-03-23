@@ -413,7 +413,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         output_batch["metrics/action_loss"] = output_batch["action_loss"]
         output_batch["metrics/video_loss"] = output_batch["video_loss"]
         output_batch["metrics/total_loss"] = output_batch["total_loss"]
-        output_batch["metrics/action_timestep_mean"] = action_t_cont.detach().mean()
+        # output_batch["metrics/action_timestep_mean"] = action_t_cont.detach().mean()
 
         if self._is_rank0() and self._action_head_log_every > 0 and iteration % self._action_head_log_every == 0:
             print(
@@ -423,7 +423,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                     f"action_loss_1={float(action_loss_1.detach().item()):.6f} "
                     f"action_loss_2={float(action_loss_2.detach().item()):.6f} "
                     f"action_loss={float(action_loss.detach().item()):.6f} "
-                    f"action_t={float(action_t_cont.detach().mean().item()):.4f} "
+                    # f"action_t={float(action_t_cont.detach().mean().item()):.4f} "
                     f"total_loss={float(total_loss.detach().item()):.6f}"
                 ),
                 flush=True,
@@ -439,7 +439,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                                 "train/action_loss_1": float(action_loss_1.detach().item()),
                                 "train/action_loss_2": float(action_loss_2.detach().item()),
                                 "train/action_loss": float(action_loss.detach().item()),
-                                "train/action_timestep_mean": float(action_t_cont.detach().mean().item()),
+                                # "train/action_timestep_mean": float(action_t_cont.detach().mean().item()),
                                 "train/total_loss": float(total_loss.detach().item()),
                             },
                             step=int(iteration),
