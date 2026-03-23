@@ -341,14 +341,14 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         action_t_cont, action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
         noise = torch.randn_like(actions)
         z1 = noise
-        z2 = ((1.0 - action_t_cont[:, None, None]) * noise + action_t_cont[:, None, None] * actions)
+        z2 = 0.9 * actions + 0.1 * noise
 
         pred1 = self.action_head(z1, delta_v, states, timestep=action_t)
         pred2 = self.action_head(z2, delta_v, states, timestep=action_t)
 
         action_loss_1 = F.mse_loss(pred1, actions)
         action_loss_2 = F.mse_loss(pred2, actions)
-        action_loss = 0.5 * (action_loss_1 + action_loss_2)
+        action_loss = action_loss_1 + action_loss_2
         total_loss = loss + self.action_loss_weight * action_loss
 
         output_batch["action_loss_1"] = action_loss_1.detach()
