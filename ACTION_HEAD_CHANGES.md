@@ -131,3 +131,11 @@
 - `ACTION_STATE_USE_QNORM`
 - `ACTION_STATE_NORM_CLIP`
 - `ACTION_STATE_GLOBAL_STATS_JSON`
+
+10. 修复 action head 4D attention 输入崩溃（2026-03-23）
+- 问题：`delta_v` 为 5D（`[B,T,C,H,W]`）时，state-gate `sigma` 被构造成了 4D（`[B,L,1,1]`），在 `x + sigma * h` 时触发广播，把序列张量污染成 4D，下一层 `nn.MultiheadAttention` 报错：
+  - `query should be unbatched 2D or batched 3D tensor but received 4-D query tensor`
+- 修复：
+  - `models/action_head.py::_compute_state_sigma` 改为始终输出 3D gate：`[B,L,1]`。
+  - 增加 shape assert：在 `ActionMIPHead.forward` / `ActionDiTBlock.forward` 对 `x/delta_tokens/state_tokens/sigma` 做 3D 检查，提前报错避免静默广播。
+- 影响：仅修复 action head 内部张量形状，不改 ckpt key 命名，不影响既有 video ckpt 加载兼容性。
