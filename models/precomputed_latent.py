@@ -80,6 +80,9 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         action_head_enabled: bool = False,
         action_head_cfg: dict | None = None,
         action_loss_weight: float = 1.0,
+        action_delta_video_t: float = 0.5,
+        action_head_timestep_mode: str = "random",
+        action_head_fixed_timestep: int = 0,
         action_head_save_every: int = 0,
         action_head_save_dir: str | None = None,
         action_head_load_path: str | None = None,
@@ -89,6 +92,9 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
         self.action_head_enabled = bool(action_head_enabled)
         self.action_loss_weight = float(action_loss_weight)
+        self.action_delta_video_t = float(action_delta_video_t)
+        self.action_head_timestep_mode = str(action_head_timestep_mode)
+        self.action_head_fixed_timestep = int(action_head_fixed_timestep)
         self.action_head_save_every = int(action_head_save_every)
         self.action_head_save_dir = action_head_save_dir
         self.action_head_load_path = action_head_load_path
@@ -210,6 +216,49 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         prev_v = v_seq[:, num_cond - 1 : num_cond + num_pred - 1, :]
         return pred_v - prev_v
 
+    def _compute_delta_v_at_fixed_video_t(self, output_batch: dict, num_cond: int, num_pred: int) -> Tensor:
+        """
+        Build an extra RF denoise pass at fixed video-time t for action branch.
+        This branch keeps gradient to video net so action loss can update video model.
+        """
+        if "x0" not in output_batch or "condition" not in output_batch:
+            raise KeyError("output_batch missing 'x0' or 'condition' for fixed-t action delta_v computation.")
+
+        x0 = output_batch["x0"]
+        condition = output_batch["condition"]
+        batch_size = x0.shape[0]
+
+        t_fix = max(0.0, min(1.0, self.action_delta_video_t))
+        t_B = torch.full((batch_size, 1), t_fix, device=x0.device, dtype=torch.float32)
+        timesteps = self.rectified_flow.get_discrete_timestamp(t_B, self.tensor_kwargs_fp32)
+        sigmas = self.rectified_flow.get_sigmas(timesteps, self.tensor_kwargs_fp32)
+        timesteps = timesteps.view(batch_size, 1)
+        sigmas = sigmas.view(batch_size, 1)
+
+        # fresh noise for fixed-t branch
+        epsilon = torch.randn_like(x0, dtype=torch.float32)
+        xt_fix, _ = self.rectified_flow.get_interpolation(epsilon, x0.to(dtype=torch.float32), sigmas)
+        v_pred_fix = self.denoise(
+            noise=epsilon,
+            xt_B_C_T_H_W=xt_fix.to(**self.tensor_kwargs),
+            timesteps_B_T=timesteps,
+            condition=condition,
+        )
+
+        v_seq = v_pred_fix.mean(dim=(-1, -2)).transpose(1, 2).contiguous()  # [B,T,C]
+        pred_v = v_seq[:, num_cond : num_cond + num_pred, :]
+        prev_v = v_seq[:, num_cond - 1 : num_cond + num_pred - 1, :]
+        return pred_v - prev_v
+
+    def _sample_action_head_timestep(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        buckets = int(getattr(self.action_head, "timestep_buckets", 1000))
+        mode = self.action_head_timestep_mode.lower()
+        if mode == "fixed":
+            t = max(0, min(buckets - 1, int(self.action_head_fixed_timestep)))
+            return torch.full((batch_size,), t, device=device, dtype=torch.long)
+        # default: independent random timestep
+        return torch.randint(low=0, high=buckets, size=(batch_size,), device=device, dtype=torch.long)
+
     def _maybe_save_action_head(self, iteration: int) -> None:
         if not self.action_head_enabled or self.action_head is None:
             return
@@ -257,7 +306,12 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
         num_cond = int(getattr(self.config, "min_num_conditional_frames", 4))
         num_pred = 8
-        delta_v = self._compute_delta_v(output_batch, num_cond=num_cond, num_pred=num_pred).to(loss.device)
+        if self.action_delta_video_t >= 0.0:
+            delta_v = self._compute_delta_v_at_fixed_video_t(output_batch, num_cond=num_cond, num_pred=num_pred).to(
+                loss.device
+            )
+        else:
+            delta_v = self._compute_delta_v(output_batch, num_cond=num_cond, num_pred=num_pred).to(loss.device)
         if self._action_head_debug and (not self._action_head_debug_printed) and self._is_rank0():
             print(
                 "[action-head][debug]",
@@ -269,9 +323,10 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         noise = torch.randn_like(actions)
         z1 = noise
         z2 = 0.9 * actions + noise
+        action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
 
-        pred1 = self.action_head(z1, delta_v, states)
-        pred2 = self.action_head(z2, delta_v, states)
+        pred1 = self.action_head(z1, delta_v, states, timestep=action_t)
+        pred2 = self.action_head(z2, delta_v, states, timestep=action_t)
 
         action_loss = 0.5 * (F.mse_loss(pred1, actions) + F.mse_loss(pred2, actions))
         total_loss = loss + self.action_loss_weight * action_loss

@@ -48,9 +48,16 @@ export JOB_WANDB_MODE="${JOB_WANDB_MODE:-$WANDB_MODE}"
 # ── Action Head 训练配置 ─────────────────────────────────────────────────────
 export ACTION_HEAD_ENABLED="${ACTION_HEAD_ENABLED:-1}"
 export ACTION_HEAD_LOSS_WEIGHT="${ACTION_HEAD_LOSS_WEIGHT:-1.0}"
-export ACTION_HEAD_SAVE_EVERY="${ACTION_HEAD_SAVE_EVERY:-1000}"
+export ACTION_DELTA_VIDEO_T="${ACTION_DELTA_VIDEO_T:-0.5}"
+export ACTION_HEAD_TIMESTEP_MODE="${ACTION_HEAD_TIMESTEP_MODE:-random}"  # random / fixed
+export ACTION_HEAD_FIXED_TIMESTEP="${ACTION_HEAD_FIXED_TIMESTEP:-0}"
+export ACTION_HEAD_SAVE_EVERY="${ACTION_HEAD_SAVE_EVERY:-500}"
 export ACTION_HEAD_SAVE_DIR="${ACTION_HEAD_SAVE_DIR:-/home/jwhe/linyihan/robot_posttrain/action_head_ckpt}"
 # 可选：加载已有 action head 参数（仅 head，不影响 video ckpt）
 export ACTION_HEAD_LOAD_PATH="${ACTION_HEAD_LOAD_PATH:-}"
 export ACTION_HEAD_LOG_EVERY="${ACTION_HEAD_LOG_EVERY:-1}"
 export ACTION_HEAD_WANDB_LOG="${ACTION_HEAD_WANDB_LOG:-1}"
+export ACTION_STATE_USE_QNORM="${ACTION_STATE_USE_QNORM:-1}"
+export ACTION_STATE_NORM_CLIP="${ACTION_STATE_NORM_CLIP:-1.0}"
+# 只读一个全局 stats.json（包含所有 task 的 action/state q01/q99）
+export ACTION_STATE_GLOBAL_STATS_JSON="${ACTION_STATE_GLOBAL_STATS_JSON:-/home/jwhe/linyihan/datasets/lerobot_robotwin_eef_clean_50/meta/stats.json}"
