@@ -43,6 +43,17 @@
   - `${ACTION_HEAD_SAVE_DIR}/action_head_iter_XXXXXXX.pt`
 - 可单独加载 action head 参数，不影响 video ckpt。
 
+5. action loss 日志
+- 控制台周期打印：
+  - `[action-head] iter=... video_loss=... action_loss=... total_loss=...`
+- 若 wandb 已开启（online/offline 且 run 已初始化），同步记录：
+  - `train/video_loss`
+  - `train/action_loss`
+  - `train/total_loss`
+- 同时在 `output_batch` 写入：
+  - `action_loss / video_loss / total_loss`
+  - `metrics/action_loss / metrics/video_loss / metrics/total_loss`
+
 ## 环境变量
 在 `export_env.sh` 新增：
 - `ACTION_HEAD_ENABLED`
@@ -50,3 +61,5 @@
 - `ACTION_HEAD_SAVE_EVERY`
 - `ACTION_HEAD_SAVE_DIR`
 - `ACTION_HEAD_LOAD_PATH`
+- `ACTION_HEAD_LOG_EVERY`
+- `ACTION_HEAD_WANDB_LOG`
