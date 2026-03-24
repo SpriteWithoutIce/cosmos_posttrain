@@ -22,6 +22,7 @@ def export_ema_bf16(
     output_dir: str,
     prefix: str,
     export_action_head: bool,
+    save_dtype: str,
 ) -> tuple[str, str | None]:
     ckpt_dir = str(Path(ckpt_dir).resolve())
     out_dir = Path(output_dir).resolve()
@@ -71,7 +72,7 @@ def export_ema_bf16(
     ema_as_net = {}
     for k, v in sd.items():
         if k.startswith("net_ema."):
-            ema_as_net["net." + k[len("net_ema.") :]] = v.detach().cpu()
+            ema_as_net["net." + k[len("net_ema.") :]] = v.detach().cpu().to(target_dtype)
 
     if len(ema_as_net) == 0:
         raise RuntimeError("No `net_ema.*` keys found in loaded checkpoint.")
@@ -82,7 +83,7 @@ def export_ema_bf16(
         "meta": {
             "source_ckpt_dir": ckpt_dir,
             "export_type": "ema_as_net",
-            "dtype": "bf16",
+            "dtype": save_dtype,
         },
     }
     torch.save(payload, str(out_pt))
@@ -118,6 +119,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--prefix", type=str, default="", help="Output prefix, e.g. timestep3000")
     parser.add_argument("--export_action_head", action="store_true")
+    parser.add_argument("--save_dtype", type=str, default="bf16", choices=["bf16", "fp32"])
     parser.add_argument("--validate_after_export", action="store_true")
     parser.add_argument("--validate_only_pt", type=str, default="")
     return parser.parse_args()
@@ -137,6 +139,7 @@ def main() -> None:
         output_dir=args.output_dir,
         prefix=args.prefix,
         export_action_head=args.export_action_head,
+        save_dtype=args.save_dtype,
     )
 
     print(f"[SAVED] ema pt: {out_pt}")
@@ -149,3 +152,10 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    dtype_map = {
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+    }
+    if save_dtype not in dtype_map:
+        raise ValueError(f"Unsupported save_dtype: {save_dtype}. Use bf16/fp32.")
+    target_dtype = dtype_map[save_dtype]
