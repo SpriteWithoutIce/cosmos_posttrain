@@ -45,25 +45,38 @@ def normalize_setup_kwargs(setup_kwargs: dict[str, Any] | None) -> dict[str, Any
     out = dict(setup_kwargs or {})
     for reserved in ("now_ep_num", "seed", "is_test"):
         out.pop(reserved, None)
-    random_setting = out.get("random_setting", None)
-    if random_setting is None:
-        out["random_setting"] = {}
-    elif not isinstance(random_setting, dict):
-        raise TypeError(f"random_setting must be dict or None, got {type(random_setting)}")
+    dr = out.get("domain_randomization", None)
+    if dr is None:
+        dr = {}
+    elif not isinstance(dr, dict):
+        raise TypeError(f"domain_randomization must be dict or None, got {type(dr)}")
+    defaults = {
+        "random_background": False,
+        "cluttered_table": False,
+        "clean_background_rate": 1.0,
+        "random_head_camera_dis": 0.0,
+        "random_table_height": 0.0,
+        "random_light": False,
+        "crazy_random_light_rate": 0.0,
+        "random_embodiment": False,
+    }
+    defaults.update(dr)
+    out["domain_randomization"] = defaults
     return out
 
 
 def setup_demo_safe(task_env: Any, *, now_ep_num: int, seed: int, is_test: bool, setup_kwargs: dict[str, Any]) -> None:
-    kwargs = dict(setup_kwargs or {})
-    if kwargs.get("random_setting", None) is None:
-        kwargs["random_setting"] = {}
+    kwargs = normalize_setup_kwargs(dict(setup_kwargs or {}))
+    kwargs.setdefault("render_freq", 0)
+    kwargs.setdefault("eval_video_log", False)
+    kwargs.setdefault("use_gui", False)
+    kwargs.setdefault("headless", True)
     try:
         task_env.setup_demo(now_ep_num=now_ep_num, seed=seed, is_test=is_test, **kwargs)
     except AttributeError as e:
-        # RoboTwin _base_task.py may call random_setting.get(...) without guarding None.
-        # Retry once with an explicit dict to avoid NoneType crash from external config overrides.
+        # RoboTwin _base_task.py may call domain_randomization.get(...) without guarding None.
         if "NoneType" in str(e) and "get" in str(e):
-            kwargs["random_setting"] = {}
+            kwargs["domain_randomization"] = normalize_setup_kwargs({}).get("domain_randomization", {})
             task_env.setup_demo(now_ep_num=now_ep_num, seed=seed, is_test=is_test, **kwargs)
             return
         raise

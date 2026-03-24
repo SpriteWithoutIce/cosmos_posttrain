@@ -236,6 +236,7 @@ class CosmosRobotWinServer:
                 emb = self.text_emb_cache[key]
                 if emb.ndim == 2:
                     emb = emb.unsqueeze(0)
+                print(f"[Server] Embedding shape: {emb.shape}")
                 return emb.to(device=self.device, dtype=target_dtype)
         # fuzzy match
         for lookup in [task_name, prompt]:
@@ -436,8 +437,6 @@ class CosmosRobotWinServer:
         task_name = payload.get("task_name", None)
         if task_name is None and isinstance(obs_payload, dict):
             task_name = obs_payload.get("task_name", None)
-        if task_name is None and isinstance(obs_payload, dict):
-            task_name = obs_payload.get("task", None)
         action = self._predict_action(task_name, prompt)
         self.step_id += 1
         return {"action": action}
