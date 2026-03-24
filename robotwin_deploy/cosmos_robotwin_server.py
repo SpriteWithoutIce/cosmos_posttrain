@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import pickle
 from dataclasses import dataclass
 from typing import Any
 
@@ -158,15 +159,16 @@ class CosmosRobotWinServer:
         self.latest_state: np.ndarray | None = None
         self.step_id = 0
 
-    def _load_text_embedding_cache(self, pt_path: str) -> dict[str, torch.Tensor]:
-        if not pt_path:
+    def _load_text_embedding_cache(self, pkl_path: str) -> dict[str, torch.Tensor]:
+        if not pkl_path:
             return {}
-        if not os.path.exists(pt_path):
-            logger.warning("text_emb_pt not found: %s", pt_path)
+        if not os.path.exists(pkl_path):
+            logger.warning("text_emb pkl not found: %s", pkl_path)
             return {}
-        obj = torch.load(pt_path, map_location="cpu", weights_only=False)
+        with open(pkl_path, "rb") as f:
+            obj = pickle.load(f)
         if not isinstance(obj, dict):
-            raise ValueError(f"text_emb_pt must contain dict, got {type(obj)}")
+            raise ValueError(f"text_emb pkl must contain dict, got {type(obj)}")
         out: dict[str, torch.Tensor] = {}
         for k, v in obj.items():
             if not isinstance(k, str):
@@ -180,13 +182,39 @@ class CosmosRobotWinServer:
             if t.ndim != 3:
                 continue
             out[k] = t
-        logger.info("Loaded %d task text embeddings from %s", len(out), pt_path)
+        logger.info("Loaded %d task text embeddings from %s", len(out), pkl_path)
         return out
 
-    def _get_text_embedding(self, prompt: str | None, target_dtype: torch.dtype) -> torch.Tensor:
-        if prompt and prompt in self.text_emb_cache:
-            emb = self.text_emb_cache[prompt].to(device=self.device, dtype=target_dtype)
-            return emb
+    def _get_text_embedding(
+        self,
+        task_name: str | None,
+        prompt: str | None,
+        target_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        # exact match: task_name first, then prompt
+        for key in [task_name, prompt]:
+            if key and key in self.text_emb_cache:
+                emb = self.text_emb_cache[key]
+                if emb.ndim == 2:
+                    emb = emb.unsqueeze(0)
+                return emb.to(device=self.device, dtype=target_dtype)
+        # fuzzy match
+        for lookup in [task_name, prompt]:
+            if not lookup:
+                continue
+            lower_lookup = lookup.lower()
+            for key, emb in self.text_emb_cache.items():
+                lower_key = key.lower()
+                if lower_lookup in lower_key or lower_key in lower_lookup:
+                    if emb.ndim == 2:
+                        emb = emb.unsqueeze(0)
+                    logger.info("Fuzzy-matched embedding: '%s' -> '%s'", lookup, key)
+                    return emb.to(device=self.device, dtype=target_dtype)
+        logger.warning(
+            "No embedding found for task='%s' prompt='%s', using zeros",
+            task_name,
+            prompt,
+        )
         return torch.zeros((1, 512, self.cfg.text_emb_dim), device=self.device, dtype=target_dtype)
 
     @staticmethod
@@ -226,15 +254,12 @@ class CosmosRobotWinServer:
 
     @torch.no_grad()
     def _encode_single_observation_to_latent(self, obs: dict[str, np.ndarray]) -> torch.Tensor:
-        cam_latents = []
-        for key in ["cam_high", "cam_left_wrist", "cam_right_wrist"]:
-            img = obs[key]
-            img_t = torch.from_numpy(img).to(self.device).float() / 127.5 - 1.0
-            img_t = img_t.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)  # [1,3,1,H,W]
-            lat = self.vae.encode(img_t)[:, :, 0]  # [1,16,H',W']
-            cam_latents.append(lat)
-        fused = torch.stack(cam_latents, dim=0).mean(dim=0)  # [1,16,H',W']
-        return fused[0].contiguous()  # [16,H',W']
+        # Use only primary camera (cam_high); encoding pipeline keeps exactly the same as before.
+        img = obs["cam_high"]
+        img_t = torch.from_numpy(img).to(self.device).float() / 127.5 - 1.0
+        img_t = img_t.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)  # [1,3,1,H,W]
+        lat = self.vae.encode(img_t)[:, :, 0]  # [1,16,H',W']
+        return lat[0].contiguous()  # [16,H',W']
 
     def _append_observation_payload(self, payload: Any) -> None:
         if payload is None:
@@ -265,7 +290,7 @@ class CosmosRobotWinServer:
         cond_latent = torch.stack(frames, dim=1).unsqueeze(0).to(self.device)  # [1,16,4,H',W']
         return cond_latent
 
-    def _build_model_batch(self, prompt: str | None) -> dict[str, torch.Tensor]:
+    def _build_model_batch(self, task_name: str | None, prompt: str | None) -> dict[str, torch.Tensor]:
         cond_latent = self._build_cond_latent()
         pred_placeholder = torch.zeros(
             (1, self.cfg.action_dim, self.cfg.num_pred_frames, cond_latent.shape[-2], cond_latent.shape[-1]),
@@ -278,7 +303,7 @@ class CosmosRobotWinServer:
             target_dtype = self.model.precision
         else:
             target_dtype = torch.bfloat16
-        text_emb = self._get_text_embedding(prompt, target_dtype)
+        text_emb = self._get_text_embedding(task_name, prompt, target_dtype)
 
         batch = {
             "video": latent_video.to(dtype=target_dtype),
@@ -290,8 +315,8 @@ class CosmosRobotWinServer:
         }
         return batch
 
-    def _predict_action(self, prompt: str | None) -> np.ndarray:
-        batch = self._build_model_batch(prompt)
+    def _predict_action(self, task_name: str | None, prompt: str | None) -> np.ndarray:
+        batch = self._build_model_batch(task_name, prompt)
         with torch.inference_mode():
             latents = self.model.generate_samples_from_batch(
                 batch,
@@ -347,7 +372,12 @@ class CosmosRobotWinServer:
         prompt = payload.get("prompt", None)
         if prompt is None and isinstance(obs_payload, dict):
             prompt = obs_payload.get("task", None)
-        action = self._predict_action(prompt)
+        task_name = payload.get("task_name", None)
+        if task_name is None and isinstance(obs_payload, dict):
+            task_name = obs_payload.get("task_name", None)
+        if task_name is None and isinstance(obs_payload, dict):
+            task_name = obs_payload.get("task", None)
+        action = self._predict_action(task_name, prompt)
         self.step_id += 1
         return {"action": action}
 
