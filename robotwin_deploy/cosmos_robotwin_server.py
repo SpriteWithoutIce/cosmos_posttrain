@@ -14,6 +14,12 @@ from einops import rearrange
 
 from cosmos_predict2._src.predict2.utils.model_loader import load_model_from_checkpoint
 from cosmos_predict2._src.predict2.tokenizers.wan2pt1 import WanVAE_
+from cosmos_predict2._src.predict2.checkpointer.dcp import (
+    DefaultLoadPlanner,
+    DistributedCheckpointer,
+    ModelWrapper,
+    dcp_load_state_dict,
+)
 
 try:
     from .websocket_policy_server import WebsocketPolicyServer
@@ -33,6 +39,7 @@ class DeployConfig:
     video_ckpt: str = ""
     action_head_ckpt: str = ""
     vae_path: str = "/home/jwhe/linyihan/cosmos/tokenizer.pth"
+    vae_device: str = "cuda"
     stats_json: str = ""
     num_cond_frames: int = 4
     num_pred_frames: int = 8
@@ -52,6 +59,7 @@ class DeployConfig:
 class CosmosVAEWrapper(torch.nn.Module):
     def __init__(self, vae_pth: str, device: str = "cuda"):
         super().__init__()
+        self.device = torch.device(device)
         cfg = dict(
             dim=96,
             z_dim=16,
@@ -64,10 +72,10 @@ class CosmosVAEWrapper(torch.nn.Module):
         )
         with torch.device("meta"):
             self.model = WanVAE_(**cfg)
-        ckpt = torch.load(vae_pth, map_location=device, weights_only=False)
+        ckpt = torch.load(vae_pth, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt, assign=True)
         self.model.eval().requires_grad_(False)
-        self.model.to(device)
+        self.model.to(self.device)
 
         mean = [-0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
                 0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921]
@@ -79,11 +87,13 @@ class CosmosVAEWrapper(torch.nn.Module):
     @torch.no_grad()
     def encode(self, videos: torch.Tensor) -> torch.Tensor:
         in_dtype = videos.dtype
-        device = videos.device
-        self.model.to(device)
-        scale = [self._mean.to(device), (1.0 / self._std).to(device)]
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            latent = self.model.encode(videos.to(torch.bfloat16), scale)
+        videos = videos.to(self.device, dtype=torch.float32)
+        scale = [self._mean.to(self.device), (1.0 / self._std).to(self.device)]
+        if self.device.type == "cuda":
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                latent = self.model.encode(videos.to(torch.bfloat16), scale)
+        else:
+            latent = self.model.encode(videos, scale)
         return latent.to(in_dtype)
 
 
@@ -132,17 +142,11 @@ class CosmosRobotWinServer:
     def __init__(self, cfg: DeployConfig):
         self.cfg = cfg
         self.device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
-        logger.info("Loading tokenizer/vae from: %s", cfg.vae_path)
-        self.vae = CosmosVAEWrapper(cfg.vae_path, device=str(self.device))
+        self.vae_device = self.device
+        logger.info("Loading tokenizer/vae from: %s on %s", cfg.vae_path, str(self.vae_device))
+        self.vae = CosmosVAEWrapper(cfg.vae_path, device=str(self.vae_device))
         logger.info("Loading model from video ckpt: %s", cfg.video_ckpt)
-        self.model, _ = load_model_from_checkpoint(
-            experiment_name=cfg.experiment_name,
-            s3_checkpoint_dir=cfg.video_ckpt,
-            config_file=cfg.config_file,
-            enable_fsdp=False,
-            load_ema_to_reg=False,
-            to_device=str(self.device),
-        )
+        self.model, _ = self._load_model_with_local_dcp_support(cfg)
         self.model.eval()
         if not hasattr(self.model, "action_head") or self.model.action_head is None:
             raise RuntimeError("Loaded model does not include action_head. Check experiment/config.")
@@ -152,6 +156,39 @@ class CosmosRobotWinServer:
         self.qnorm = ActionStateQNorm(cfg.stats_json)
         self.text_emb_cache = self._load_text_embedding_cache(cfg.text_emb_pt)
         self._reset()
+
+    def _load_model_with_local_dcp_support(self, cfg: DeployConfig):
+        ckpt_path = cfg.video_ckpt
+        is_local_dcp_dir = os.path.isdir(ckpt_path) and len([f for f in os.listdir(ckpt_path) if f.endswith(".distcp")]) > 0
+        if not is_local_dcp_dir:
+            return load_model_from_checkpoint(
+                experiment_name=cfg.experiment_name,
+                s3_checkpoint_dir=ckpt_path,
+                config_file=cfg.config_file,
+                enable_fsdp=False,
+                load_ema_to_reg=False,
+                to_device=str(self.device),
+            )
+
+        logger.info("Detected local DCP checkpoint directory, using DCP loader path.")
+        model, model_cfg = load_model_from_checkpoint(
+            experiment_name=cfg.experiment_name,
+            s3_checkpoint_dir=ckpt_path,
+            config_file=cfg.config_file,
+            enable_fsdp=False,
+            load_ema_to_reg=False,
+            to_device=str(self.device),
+            skip_load_model=True,
+        )
+        checkpointer = DistributedCheckpointer(model_cfg.checkpoint, model_cfg.job, callbacks=None, disable_async=True)
+        wrapper = ModelWrapper(model, load_ema_to_reg=False)
+        state_dict = wrapper.state_dict()
+        storage_reader = checkpointer.get_storage_reader(ckpt_path)
+        load_planner = DefaultLoadPlanner(allow_partial_load=True)
+        dcp_load_state_dict(state_dict, storage_reader, load_planner)
+        wrapper.load_state_dict(state_dict)
+        torch.cuda.empty_cache()
+        return model, model_cfg
 
     def _reset(self):
         self.raw_obs_history: list[dict[str, np.ndarray]] = []
@@ -259,7 +296,7 @@ class CosmosRobotWinServer:
         img_t = torch.from_numpy(img).to(self.device).float() / 127.5 - 1.0
         img_t = img_t.permute(2, 0, 1).unsqueeze(0).unsqueeze(2)  # [1,3,1,H,W]
         lat = self.vae.encode(img_t)[:, :, 0]  # [1,16,H',W']
-        return lat[0].contiguous()  # [16,H',W']
+        return lat[0].to(self.device).contiguous()  # [16,H',W']
 
     def _append_observation_payload(self, payload: Any) -> None:
         if payload is None:
@@ -392,6 +429,7 @@ def parse_args() -> DeployConfig:
     parser.add_argument("--video_ckpt", type=str, required=True)
     parser.add_argument("--action_head_ckpt", type=str, required=True)
     parser.add_argument("--vae_path", type=str, default="/home/jwhe/linyihan/cosmos/tokenizer.pth")
+    parser.add_argument("--vae_device", type=str, default="cpu")
     parser.add_argument("--stats_json", type=str, default="")
     parser.add_argument("--num_steps", type=int, default=10)
     parser.add_argument("--guidance", type=float, default=0.0)
