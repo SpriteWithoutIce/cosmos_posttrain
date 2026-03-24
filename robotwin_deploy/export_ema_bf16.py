@@ -27,6 +27,13 @@ def export_ema_bf16(
     ckpt_dir = str(Path(ckpt_dir).resolve())
     out_dir = Path(output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    dtype_map = {
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+    }
+    if save_dtype not in dtype_map:
+        raise ValueError(f"Unsupported save_dtype: {save_dtype}. Use bf16/fp32.")
+    target_dtype = dtype_map[save_dtype]
 
     if not prefix:
         prefix = Path(ckpt_dir).name  # e.g. iter_000003000
@@ -152,10 +159,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    dtype_map = {
-        "bf16": torch.bfloat16,
-        "fp32": torch.float32,
-    }
-    if save_dtype not in dtype_map:
-        raise ValueError(f"Unsupported save_dtype: {save_dtype}. Use bf16/fp32.")
-    target_dtype = dtype_map[save_dtype]
