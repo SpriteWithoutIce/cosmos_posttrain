@@ -7,6 +7,12 @@ from pathlib import Path
 import torch
 
 from cosmos_predict2._src.predict2.utils.model_loader import load_model_from_checkpoint
+from cosmos_predict2._src.predict2.checkpointer.dcp import (
+    DefaultLoadPlanner,
+    DistributedCheckpointer,
+    ModelWrapper,
+    dcp_load_state_dict,
+)
 
 
 def export_ema_bf16(
@@ -24,13 +30,41 @@ def export_ema_bf16(
     if not prefix:
         prefix = Path(ckpt_dir).name  # e.g. iter_000003000
 
-    model, _ = load_model_from_checkpoint(
+    # Build model first, then load weights.
+    # This avoids easy_io local-path limitations for DCP directories.
+    model, config = load_model_from_checkpoint(
         experiment_name=experiment_name,
         s3_checkpoint_dir=ckpt_dir,
         config_file=config_file,
         enable_fsdp=False,
         load_ema_to_reg=False,
+        skip_load_model=True,
     )
+    ckpt_path = Path(ckpt_dir)
+    dcp_model_dir = ckpt_path
+    if ckpt_path.is_dir() and (ckpt_path / "model").exists():
+        dcp_model_dir = ckpt_path / "model"
+    if dcp_model_dir.is_dir():
+        distcp_files = list(dcp_model_dir.glob("*.distcp"))
+        if len(distcp_files) == 0:
+            raise FileNotFoundError(f"No *.distcp files found under {dcp_model_dir}")
+        # DCP load path
+        checkpointer = DistributedCheckpointer(config.checkpoint, config.job, callbacks=None, disable_async=True)
+        wrapper = ModelWrapper(model, load_ema_to_reg=False)
+        state_dict = wrapper.state_dict()
+        storage_reader = checkpointer.get_storage_reader(str(dcp_model_dir))
+        load_planner = DefaultLoadPlanner(allow_partial_load=True)
+        dcp_load_state_dict(state_dict, storage_reader, load_planner)
+        wrapper.load_state_dict(state_dict)
+    else:
+        # Fallback: .pt path
+        model, _ = load_model_from_checkpoint(
+            experiment_name=experiment_name,
+            s3_checkpoint_dir=ckpt_dir,
+            config_file=config_file,
+            enable_fsdp=False,
+            load_ema_to_reg=False,
+        )
     model.eval()
 
     sd = model.state_dict()
@@ -80,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("Export DCP checkpoint -> single ema_bf16.pt")
     parser.add_argument("--experiment_name", type=str, required=True)
     parser.add_argument("--config_file", type=str, required=True)
-    parser.add_argument("--ckpt_dir", type=str, required=True, help="Path like .../checkpoints/iter_000003000")
+    parser.add_argument("--ckpt_dir", type=str, required=True, help="Path like .../checkpoints/iter_000003000 or .../iter_000003000/model")
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--prefix", type=str, default="", help="Output prefix, e.g. timestep3000")
     parser.add_argument("--export_action_head", action="store_true")
@@ -115,4 +149,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
