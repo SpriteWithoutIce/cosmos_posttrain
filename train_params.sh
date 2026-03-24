@@ -87,5 +87,5 @@ export_train_env() {
   export ACTION_STATE_USE_QNORM="$action_state_use_qnorm"
   export ACTION_STATE_NORM_CLIP="$action_state_norm_clip"
 
-  export PYTHONPATH="$COSMOS_PREDICT2_ROOT:$PYTHONPATH"
+  export PYTHONPATH="$COSMOS_PREDICT2_ROOT:${PYTHONPATH:-}"
 }
