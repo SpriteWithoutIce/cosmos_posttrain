@@ -13,7 +13,7 @@ EXTRA_CONFIG="${EXTRA_CONFIG:-}"
 cd "$(dirname "$0")/.."
 
 CMD=(
-  python -m robotwin_deploy.eval_robotwin_client
+  python -m robotwin_deploy.eval_polict_client_openpi
   --robowin_root "${ROBOTWIN_ROOT}"
   --task_name "${TASK_NAME}"
   --host "${HOST}"
@@ -28,4 +28,3 @@ if [[ -n "${EXTRA_CONFIG}" ]]; then
 fi
 
 "${CMD[@]}"
-

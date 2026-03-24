@@ -41,6 +41,34 @@ def class_decorator(task_name: str):
     return env_class()
 
 
+def normalize_setup_kwargs(setup_kwargs: dict[str, Any] | None) -> dict[str, Any]:
+    out = dict(setup_kwargs or {})
+    for reserved in ("now_ep_num", "seed", "is_test"):
+        out.pop(reserved, None)
+    random_setting = out.get("random_setting", None)
+    if random_setting is None:
+        out["random_setting"] = {}
+    elif not isinstance(random_setting, dict):
+        raise TypeError(f"random_setting must be dict or None, got {type(random_setting)}")
+    return out
+
+
+def setup_demo_safe(task_env: Any, *, now_ep_num: int, seed: int, is_test: bool, setup_kwargs: dict[str, Any]) -> None:
+    kwargs = dict(setup_kwargs or {})
+    if kwargs.get("random_setting", None) is None:
+        kwargs["random_setting"] = {}
+    try:
+        task_env.setup_demo(now_ep_num=now_ep_num, seed=seed, is_test=is_test, **kwargs)
+    except AttributeError as e:
+        # RoboTwin _base_task.py may call random_setting.get(...) without guarding None.
+        # Retry once with an explicit dict to avoid NoneType crash from external config overrides.
+        if "NoneType" in str(e) and "get" in str(e):
+            kwargs["random_setting"] = {}
+            task_env.setup_demo(now_ep_num=now_ep_num, seed=seed, is_test=is_test, **kwargs)
+            return
+        raise
+
+
 def format_obs(observation: dict, prompt: str) -> dict:
     return {
         "observation.images.cam_high": observation["observation"]["head_camera"]["rgb"],
@@ -102,8 +130,11 @@ def eval_policy(
     save_root: str,
     task_name: str,
     seed: int = 0,
+    setup_kwargs: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
     from envs.utils.create_actor import UnStableError
+
+    setup_kwargs = normalize_setup_kwargs(setup_kwargs)
 
     task_env.suc = 0
     task_env.test_num = 0
@@ -113,7 +144,13 @@ def eval_policy(
 
     while succ_seed < test_num:
         try:
-            task_env.setup_demo(now_ep_num=task_env.test_num, seed=now_seed, is_test=True)
+            setup_demo_safe(
+                task_env,
+                now_ep_num=task_env.test_num,
+                seed=now_seed,
+                is_test=True,
+                setup_kwargs=setup_kwargs,
+            )
             episode_info = task_env.play_once()
             task_env.close_env()
         except UnStableError:
@@ -131,7 +168,13 @@ def eval_policy(
             continue
 
         succ_seed += 1
-        task_env.setup_demo(now_ep_num=task_env.test_num, seed=now_seed, is_test=True)
+        setup_demo_safe(
+            task_env,
+            now_ep_num=task_env.test_num,
+            seed=now_seed,
+            is_test=True,
+            setup_kwargs=setup_kwargs,
+        )
         prompt = task_env.get_instruction()
         model.infer({"reset": True, "prompt": prompt})
 
@@ -199,9 +242,13 @@ def main() -> None:
     parser.add_argument("--extra_config", type=str, default="", help="Optional yaml config to merge into args.")
     args = parser.parse_args()
 
+    extra_cfg: dict[str, Any] = {}
     if args.extra_config:
         with open(args.extra_config, "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
+            cfg = yaml.safe_load(f) or {}
+        if not isinstance(cfg, dict):
+            raise TypeError(f"extra_config must be yaml dict, got {type(cfg)}")
+        extra_cfg = dict(cfg)
         for k, v in cfg.items():
             if hasattr(args, k):
                 setattr(args, k, v)
@@ -218,6 +265,7 @@ def main() -> None:
         save_root=args.save_root,
         task_name=args.task_name,
         seed=args.seed,
+        setup_kwargs=extra_cfg,
     )
 
     result_file = Path(args.save_root) / f"stseed-{st_seed}" / "metrics" / args.task_name / "_result.txt"
@@ -230,4 +278,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

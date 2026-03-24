@@ -192,7 +192,9 @@ class CosmosRobotWinServer:
 
     def _reset(self):
         self.raw_obs_history: list[dict[str, np.ndarray]] = []
+        self.raw_state_history: list[np.ndarray] = []
         self.latent_history: list[torch.Tensor] = []
+        self.latent_state_history: list[np.ndarray] = []
         self.latest_state: np.ndarray | None = None
         self.step_id = 0
 
@@ -287,6 +289,7 @@ class CosmosRobotWinServer:
     def _append_single_observation(self, payload_obs: dict[str, Any]) -> None:
         cams, state = self._extract_obs_dict(payload_obs)
         self.raw_obs_history.append(cams)
+        self.raw_state_history.append(state)
         self.latest_state = state
 
     @torch.no_grad()
@@ -310,6 +313,14 @@ class CosmosRobotWinServer:
             return
         raise TypeError(f"Unsupported obs payload type: {type(payload)}")
 
+    def _append_latent_with_state(self, cams: dict[str, np.ndarray], state: np.ndarray) -> None:
+        self.raw_obs_history.append(cams)
+        self.raw_state_history.append(state)
+        latent = self._encode_single_observation_to_latent(cams)
+        self.latent_history.append(latent)
+        self.latent_state_history.append(state)
+        self.latest_state = state
+
     def _get_last_k(self, values: list[Any], k: int) -> list[Any]:
         assert len(values) > 0
         out = values[-k:]
@@ -323,9 +334,21 @@ class CosmosRobotWinServer:
                 raise RuntimeError("No observation available for latent encoding.")
             init_lat = self._encode_single_observation_to_latent(self.raw_obs_history[-1])
             self.latent_history.append(init_lat)
+            if len(self.raw_state_history) == 0:
+                raise RuntimeError("No state available for latent encoding.")
+            self.latent_state_history.append(self.raw_state_history[-1])
         frames = self._get_last_k(self.latent_history, self.cfg.num_cond_frames)
         cond_latent = torch.stack(frames, dim=1).unsqueeze(0).to(self.device)  # [1,16,4,H',W']
         return cond_latent
+
+    def _get_state_for_infer(self) -> np.ndarray:
+        # Training uses 4 latents + current state. Prefer current state from latest observation;
+        # if absent, fall back to the state aligned with the latest latent.
+        if self.latest_state is not None:
+            return self.latest_state.astype(np.float32)
+        if len(self.latent_state_history) > 0:
+            return self.latent_state_history[-1].astype(np.float32)
+        raise RuntimeError("State is missing for action head inference.")
 
     def _build_model_batch(self, task_name: str | None, prompt: str | None) -> dict[str, torch.Tensor]:
         cond_latent = self._build_cond_latent()
@@ -341,6 +364,9 @@ class CosmosRobotWinServer:
         else:
             target_dtype = torch.bfloat16
         text_emb = self._get_text_embedding(task_name, prompt, target_dtype)
+        state = self._get_state_for_infer()
+        state = self.qnorm.norm_state(state)
+        state_t = torch.from_numpy(state).to(self.device).unsqueeze(0).to(dtype=torch.float32)
 
         batch = {
             "video": latent_video.to(dtype=target_dtype),
@@ -349,6 +375,8 @@ class CosmosRobotWinServer:
             "fps": torch.tensor([16], device=self.device, dtype=target_dtype),
             "padding_mask": torch.zeros((1, 1, cond_latent.shape[-2], cond_latent.shape[-1]), device=self.device, dtype=target_dtype),
             "num_conditional_frames": self.cfg.num_cond_frames,
+            # Keep state in batch for consistency/debug visibility with training fields.
+            "states": state_t,
         }
         return batch
 
@@ -367,9 +395,7 @@ class CosmosRobotWinServer:
             prev_v = latents[:, :, self.cfg.num_cond_frames - 1 : self.cfg.num_cond_frames + self.cfg.num_pred_frames - 1]
             delta_v = rearrange(pred_v - prev_v, "b c t h w -> b t c h w").contiguous()
 
-            if self.latest_state is None:
-                raise RuntimeError("State is missing for action head inference.")
-            state = self.latest_state.astype(np.float32)
+            state = self._get_state_for_infer()
             state = self.qnorm.norm_state(state)
             state_t = torch.from_numpy(state).to(self.device).unsqueeze(0)
 
@@ -395,10 +421,8 @@ class CosmosRobotWinServer:
             else:
                 sampled = [obs_seq]
             for one in sampled:
-                cams, _ = self._extract_obs_dict(one)
-                self.raw_obs_history.append(cams)
-                latent = self._encode_single_observation_to_latent(cams)
-                self.latent_history.append(latent)
+                cams, state = self._extract_obs_dict(one)
+                self._append_latent_with_state(cams, state)
             return {}
 
         obs_payload = payload.get("obs", payload)
