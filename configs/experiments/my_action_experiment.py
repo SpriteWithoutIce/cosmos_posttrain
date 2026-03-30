@@ -50,10 +50,12 @@ OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "200"))
 OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "1"))
 OPEN_LOOP_GUIDANCE = float(os.environ.get("OPEN_LOOP_GUIDANCE", "0.0"))
 ACTION_HEAD_ENABLED = int(os.environ.get("ACTION_HEAD_ENABLED", "1"))
+ACTION_HEAD_TYPE = os.environ.get("ACTION_HEAD_TYPE", "flow_matching")  # "mip" | "flow_matching"
 ACTION_HEAD_LR = float(os.environ.get("ACTION_HEAD_LR", "1e-4"))
 ACTION_HEAD_LOSS_WEIGHT = float(os.environ.get("ACTION_HEAD_LOSS_WEIGHT", "1.0"))
+VIDEO_STRATEGY_TYPE = os.environ.get("VIDEO_STRATEGY_TYPE", "action_conditioned_rf")  # "standard_rf" | "action_conditioned_rf"
 ACTION_DELTA_VIDEO_T = float(os.environ.get("ACTION_DELTA_VIDEO_T", "0.5"))
-ACTION_HEAD_TIMESTEP_MODE = os.environ.get("ACTION_HEAD_TIMESTEP_MODE", "beta")
+ACTION_HEAD_TIMESTEP_MODE = os.environ.get("ACTION_HEAD_TIMESTEP_MODE", "uniform")
 ACTION_HEAD_FIXED_TIMESTEP = int(os.environ.get("ACTION_HEAD_FIXED_TIMESTEP", "0"))
 ACTION_HEAD_MIP_GT_MIX = float(os.environ.get("ACTION_HEAD_MIP_GT_MIX", "0.9"))
 ACTION_HEAD_NOISE_BETA_ALPHA = float(os.environ.get("ACTION_HEAD_NOISE_BETA_ALPHA", "1.5"))
@@ -64,6 +66,10 @@ ACTION_HEAD_DELTA_POOL_W = int(os.environ.get("ACTION_HEAD_DELTA_POOL_W", "0"))
 ACTION_HEAD_DELTA_H = int(os.environ.get("ACTION_HEAD_DELTA_H", "60"))
 ACTION_HEAD_DELTA_W = int(os.environ.get("ACTION_HEAD_DELTA_W", "80"))
 ACTION_HEAD_ACTIONS_PER_LATENT = int(os.environ.get("ACTION_HEAD_ACTIONS_PER_LATENT", "8"))
+ACTION_HEAD_USE_STATE = int(os.environ.get("ACTION_HEAD_USE_STATE", "0"))  # 0=off (default for flow_matching)
+ACTION_HEAD_D_MODEL = int(os.environ.get("ACTION_HEAD_D_MODEL", "1024"))
+ACTION_HEAD_N_BLOCKS = int(os.environ.get("ACTION_HEAD_N_BLOCKS", "8"))
+ACTION_HEAD_HIDDEN_DIM = int(os.environ.get("ACTION_HEAD_HIDDEN_DIM", "2048"))  # DiT model_channels
 ACTION_HEAD_SAVE_EVERY = int(os.environ.get("ACTION_HEAD_SAVE_EVERY", "500"))
 ACTION_HEAD_SAVE_DIR = os.environ.get(
     "ACTION_HEAD_SAVE_DIR",
@@ -491,14 +497,72 @@ class CompatibleDataLoader(DataLoader):
 # 2. Experiment Config（注册 DataLoader）
 # =============================================================================
 
+def _build_action_head_cfg():
+    """Build action_head_cfg based on ACTION_HEAD_TYPE."""
+    if ACTION_HEAD_TYPE == "mip":
+        return dict(
+            action_dim=ACTION_DIM,
+            num_actions=64,
+            d_model=ACTION_HEAD_D_MODEL,
+            n_heads=8,
+            n_blocks=ACTION_HEAD_N_BLOCKS,
+            delta_dim=16,
+            state_dim=ACTION_DIM,
+            sigma_k=4.0,
+            dropout=0.0,
+            delta_spatial_pool_h=ACTION_HEAD_DELTA_POOL_H,
+            delta_spatial_pool_w=ACTION_HEAD_DELTA_POOL_W,
+            delta_height=ACTION_HEAD_DELTA_H,
+            delta_width=ACTION_HEAD_DELTA_W,
+            actions_per_latent=ACTION_HEAD_ACTIONS_PER_LATENT,
+            use_state=bool(ACTION_HEAD_USE_STATE),
+        )
+    elif ACTION_HEAD_TYPE == "flow_matching":
+        return dict(
+            action_dim=ACTION_DIM,
+            num_actions=64,
+            d_model=ACTION_HEAD_D_MODEL,
+            n_heads=8,
+            n_blocks=ACTION_HEAD_N_BLOCKS,
+            hidden_dim=ACTION_HEAD_HIDDEN_DIM,
+            state_dim=ACTION_DIM,
+            dropout=0.0,
+            actions_per_latent=ACTION_HEAD_ACTIONS_PER_LATENT,
+            timestep_mode=ACTION_HEAD_TIMESTEP_MODE,
+            noise_beta_alpha=ACTION_HEAD_NOISE_BETA_ALPHA,
+            noise_beta_beta=ACTION_HEAD_NOISE_BETA_BETA,
+            noise_s=ACTION_HEAD_NOISE_BETA_S,
+            use_state=bool(ACTION_HEAD_USE_STATE),
+        )
+    else:
+        raise ValueError(f"Unknown ACTION_HEAD_TYPE: {ACTION_HEAD_TYPE}")
+
+
+def _build_video_strategy_cfg():
+    """Build video_strategy_cfg based on VIDEO_STRATEGY_TYPE."""
+    if VIDEO_STRATEGY_TYPE == "standard_rf":
+        return dict(delta_video_t=ACTION_DELTA_VIDEO_T)
+    elif VIDEO_STRATEGY_TYPE == "action_conditioned_rf":
+        return dict(
+            action_dim=ACTION_DIM,
+            num_actions=64,
+            model_channels=ACTION_HEAD_HIDDEN_DIM,
+        )
+    else:
+        raise ValueError(f"Unknown VIDEO_STRATEGY_TYPE: {VIDEO_STRATEGY_TYPE}")
+
+
 PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
     trainer=dict(
         distributed_parallelism="fsdp",
     ),
     model=L(PrecomputedLatentVideo2WorldModel)(
         action_head_enabled=bool(ACTION_HEAD_ENABLED),
+        action_head_type=ACTION_HEAD_TYPE,
         action_head_lr=ACTION_HEAD_LR,
         action_loss_weight=ACTION_HEAD_LOSS_WEIGHT,
+        video_strategy_type=VIDEO_STRATEGY_TYPE,
+        video_strategy_cfg=_build_video_strategy_cfg(),
         action_delta_video_t=ACTION_DELTA_VIDEO_T,
         action_head_timestep_mode=ACTION_HEAD_TIMESTEP_MODE,
         action_head_fixed_timestep=ACTION_HEAD_FIXED_TIMESTEP,
@@ -509,26 +573,11 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
         action_head_save_every=ACTION_HEAD_SAVE_EVERY,
         action_head_save_dir=ACTION_HEAD_SAVE_DIR,
         action_head_load_path=ACTION_HEAD_LOAD_PATH if ACTION_HEAD_LOAD_PATH else None,
-        action_head_cfg=dict(
-            action_dim=16,
-            num_actions=64,
-            d_model=1024,
-            n_heads=8,
-            n_blocks=8,
-            delta_dim=16,
-            state_dim=16,
-            sigma_k=4.0,
-            dropout=0.0,
-            delta_spatial_pool_h=ACTION_HEAD_DELTA_POOL_H,
-            delta_spatial_pool_w=ACTION_HEAD_DELTA_POOL_W,
-            delta_height=ACTION_HEAD_DELTA_H,
-            delta_width=ACTION_HEAD_DELTA_W,
-            actions_per_latent=ACTION_HEAD_ACTIONS_PER_LATENT,
-        ),
+        action_head_cfg=_build_action_head_cfg(),
         config=Video2WorldModelRectifiedFlowConfig(
             fsdp_shard_size=2,
             state_t=STATE_T,
-            text_encoder_config=None,  # 使用预计算 text_emb，不在线加载 reason1
+            text_encoder_config=None,
             tokenizer=L(IdentityLatentTokenizer)(
                 latent_ch=16,
                 spatial_compression_factor=8,
