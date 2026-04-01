@@ -583,7 +583,7 @@ my_video_experiment = LazyDict(
         defaults=[
             "/experiment/Stage-c_pt_4-reason_embeddings-v1p1-Index-26-Size-2B-Res-720-Fps-16-Note-T2V_high_sigma_loss_reweighted_1_1_rectified_flow_only",
             {"override /model": "precomputed_latent_video2world_fsdp_rectified_flow"},
-            {"override /net": "cosmos_v1_2B"},
+            {"override /net": "cosmos_v1_2B_asymmetric_conditioned"},
             {"override /conditioner": "video_prediction_conditioner"},
             {"override /data_train": "lerobot_eef_50_train"},
             {"override /data_val": "lerobot_eef_50_val"},

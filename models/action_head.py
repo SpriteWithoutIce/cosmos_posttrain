@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -79,27 +79,13 @@ def _build_causal_cross_mask(num_q: int, num_kv: int, actions_per_kv: int, devic
 
 
 class ActionTransformerBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, use_state_condition: bool = False):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0):
         super().__init__()
-        self.use_state_condition = bool(use_state_condition)
-
         self.self_norm = nn.LayerNorm(d_model)
         self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
-
-        self.video_q_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(3)])
-        self.video_kv_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(3)])
-        self.video_attns = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True) for _ in range(3)]
-        )
-
-        if self.use_state_condition:
-            self.state_q_norm = nn.LayerNorm(d_model)
-            self.state_kv_norm = nn.LayerNorm(d_model)
-            self.state_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
-        else:
-            self.state_q_norm = None
-            self.state_kv_norm = None
-            self.state_attn = None
+        self.video_q_norm = nn.LayerNorm(d_model)
+        self.video_kv_norm = nn.LayerNorm(d_model)
+        self.video_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
 
         self.ffn_norm = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
@@ -108,7 +94,15 @@ class ActionTransformerBlock(nn.Module):
             nn.Linear(4 * d_model, d_model),
         )
 
-    def _cross(self, x: torch.Tensor, cond: torch.Tensor, q_norm: nn.LayerNorm, kv_norm: nn.LayerNorm, attn: nn.Module, attn_mask: torch.Tensor | None) -> torch.Tensor:
+    def _cross(
+        self,
+        x: torch.Tensor,
+        cond: torch.Tensor,
+        q_norm: nn.LayerNorm,
+        kv_norm: nn.LayerNorm,
+        attn: nn.Module,
+        attn_mask: torch.Tensor | None,
+    ) -> torch.Tensor:
         q = q_norm(x)
         kv = kv_norm(cond)
         h, _ = attn(q, kv, kv, attn_mask=attn_mask, need_weights=False)
@@ -118,34 +112,19 @@ class ActionTransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         video_tokens: torch.Tensor,
-        state_tokens: torch.Tensor | None,
         self_mask: torch.Tensor,
-        cross_video_mask: torch.Tensor,
-        cross_state_mask: torch.Tensor | None,
+        cross_video_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         if x.ndim != 3:
             raise ValueError(f"Expected x [B,L,D], got {tuple(x.shape)}")
         if video_tokens.ndim != 3:
             raise ValueError(f"Expected video_tokens [B,Lv,D], got {tuple(video_tokens.shape)}")
-        if self.use_state_condition and (state_tokens is None or state_tokens.ndim != 3):
-            raise ValueError("State conditioning is enabled, but state tokens are missing or invalid.")
 
         h = self.self_norm(x)
         h, _ = self.self_attn(h, h, h, attn_mask=self_mask, need_weights=False)
         x = x + h
 
-        for q_norm, kv_norm, attn in zip(self.video_q_norms, self.video_kv_norms, self.video_attns):
-            x = self._cross(x, video_tokens, q_norm, kv_norm, attn, cross_video_mask)
-
-        if self.use_state_condition:
-            x = self._cross(
-                x,
-                state_tokens,
-                self.state_q_norm,
-                self.state_kv_norm,
-                self.state_attn,
-                cross_state_mask,
-            )
+        x = self._cross(x, video_tokens, self.video_q_norm, self.video_kv_norm, self.video_attn, cross_video_mask)
 
         x = x + self.ffn(self.ffn_norm(x))
         return x
@@ -175,6 +154,10 @@ class FlowMatchingActionHead(nn.Module):
         self.timestep_buckets = int(timestep_buckets)
         self.actions_per_latent = int(actions_per_latent)
         self.use_state_condition = bool(use_state_condition)
+        if self.use_state_condition:
+            raise ValueError("Layer-aligned action head does not support state conditioning.")
+        self.requires_video_hidden_layers = True
+        self.uses_conditional_video_frames_only = True
 
         self.action_in = nn.Sequential(
             nn.Linear(self.action_dim + 1, d_model),
@@ -187,14 +170,6 @@ class FlowMatchingActionHead(nn.Module):
             nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
-        if self.use_state_condition:
-            self.state_in = nn.Sequential(
-                nn.Linear(self.state_dim, d_model),
-                nn.SiLU(),
-                nn.Linear(d_model, d_model),
-            )
-        else:
-            self.state_in = None
         self.timestep_proj = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.SiLU(),
@@ -207,7 +182,6 @@ class FlowMatchingActionHead(nn.Module):
                     d_model=d_model,
                     n_heads=n_heads,
                     dropout=dropout,
-                    use_state_condition=self.use_state_condition,
                 )
                 for _ in range(n_blocks)
             ]
@@ -235,7 +209,10 @@ class FlowMatchingActionHead(nn.Module):
         temb = self.timestep_proj(temb).unsqueeze(1)
         return t_scalar, temb
 
-    def _prepare_video_tokens(self, video_tokens: torch.Tensor) -> tuple[torch.Tensor, int, int, tuple[int, int] | None]:
+    def _prepare_video_tokens(
+        self,
+        video_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, int, int, tuple[int, int] | None]:
         if video_tokens.ndim == 5:
             bsz, num_frames, h, w, hidden_dim = video_tokens.shape
             if hidden_dim != self.video_hidden_dim:
@@ -290,32 +267,37 @@ class FlowMatchingActionHead(nn.Module):
         pos = pos.reshape(1, num_frames * tokens_per_frame, d_model)
         return pos.expand(batch_size, -1, -1).to(dtype=dtype)
 
-    def _get_masks(
-        self,
-        num_actions: int,
-        num_frames: int,
-        tokens_per_frame: int,
-        num_state_tokens: int,
-        device: torch.device,
-    ):
-        key = (num_actions, num_frames, tokens_per_frame, num_state_tokens, str(device))
+    def _get_self_mask(self, num_actions: int, device: torch.device) -> torch.Tensor:
+        key = (num_actions, 0, 0, 0, str(device))
         if key not in self._cached_masks:
             self_mask = _build_block_causal_self_mask(
                 seq_len=num_actions,
                 block_size=self.actions_per_latent,
                 device=device,
             )
-            cross_video_mask = None
-            cross_state_mask = None
-            if self.use_state_condition:
-                cross_state_mask = _build_causal_cross_mask(num_actions, num_state_tokens, 1, device)
-            self._cached_masks[key] = (self_mask, cross_video_mask, cross_state_mask)
-        return self._cached_masks[key]
+            self._cached_masks[key] = (self_mask, torch.empty(0, device=device), None)
+        return self._cached_masks[key][0]
+
+    def _encode_video_context(self, video_tokens: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        bsz = video_tokens.shape[0]
+        video_tokens_grouped, num_frames, tokens_per_frame, spatial_hw = self._prepare_video_tokens(video_tokens)
+        video_ctx = self.video_in(
+            video_tokens_grouped.to(dtype=dtype).view(bsz, num_frames * tokens_per_frame, self.video_hidden_dim)
+        )
+        video_ctx = video_ctx + self._build_video_positional_encoding(
+            batch_size=bsz,
+            num_frames=num_frames,
+            tokens_per_frame=tokens_per_frame,
+            device=video_tokens.device,
+            dtype=dtype,
+            spatial_hw=spatial_hw,
+        )
+        return video_ctx
 
     def forward(
         self,
         z_action: torch.Tensor,
-        video_tokens: torch.Tensor,
+        video_tokens: List[torch.Tensor] | Tuple[torch.Tensor, ...],
         state_vec: torch.Tensor | None = None,
         timestep: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -327,11 +309,12 @@ class FlowMatchingActionHead(nn.Module):
             raise ValueError(f"Expected action dim {self.action_dim}, got {action_dim}")
         if seq_len != self.num_actions:
             raise ValueError(f"Expected num_actions {self.num_actions}, got {seq_len}")
-        if self.use_state_condition:
-            if state_vec is None or state_vec.ndim != 2:
-                raise ValueError("State conditioning is enabled, but state_vec is missing or invalid.")
-            if state_vec.shape[-1] != self.state_dim:
-                raise ValueError(f"Expected state dim {self.state_dim}, got {state_vec.shape[-1]}")
+        if state_vec is not None:
+            raise ValueError("State conditioning is disabled for the current action head.")
+        if not isinstance(video_tokens, (list, tuple)):
+            raise ValueError("Expected layer-aligned video tokens as a list/tuple of tensors.")
+        if len(video_tokens) != len(self.blocks):
+            raise ValueError(f"Expected {len(self.blocks)} video hidden layers, got {len(video_tokens)}")
 
         t_scalar, temb = self._build_token_timestep(timestep, batch_size=bsz, seq_len=seq_len, device=z_action.device)
 
@@ -339,40 +322,15 @@ class FlowMatchingActionHead(nn.Module):
         pos_ids = torch.arange(seq_len, dtype=torch.long, device=z_action.device)
         x = x + self.pos_embedding(pos_ids).unsqueeze(0) + temb.to(dtype=x.dtype)
 
-        video_tokens_grouped, num_frames, tokens_per_frame, spatial_hw = self._prepare_video_tokens(video_tokens)
-        video_ctx = self.video_in(
-            video_tokens_grouped.to(dtype=x.dtype).view(bsz, num_frames * tokens_per_frame, self.video_hidden_dim)
-        )
-        video_ctx = video_ctx + self._build_video_positional_encoding(
-            batch_size=bsz,
-            num_frames=num_frames,
-            tokens_per_frame=tokens_per_frame,
-            device=x.device,
-            dtype=x.dtype,
-            spatial_hw=spatial_hw,
-        )
-        state_tokens = None
-        num_state_tokens = 0
-        if self.use_state_condition:
-            state_tokens = self.state_in(state_vec.unsqueeze(1).to(dtype=x.dtype))
-            num_state_tokens = state_tokens.shape[1]
+        self_mask = self._get_self_mask(num_actions=seq_len, device=x.device)
 
-        self_mask, cross_video_mask, cross_state_mask = self._get_masks(
-            num_actions=seq_len,
-            num_frames=num_frames,
-            tokens_per_frame=tokens_per_frame,
-            num_state_tokens=num_state_tokens,
-            device=x.device,
-        )
-
-        for block in self.blocks:
+        for block, layer_video_tokens in zip(self.blocks, video_tokens):
+            video_ctx = self._encode_video_context(layer_video_tokens, dtype=x.dtype)
             x = block(
                 x,
                 video_tokens=video_ctx,
-                state_tokens=state_tokens,
                 self_mask=self_mask,
-                cross_video_mask=cross_video_mask,
-                cross_state_mask=cross_state_mask,
+                cross_video_mask=None,
             )
 
         x = self.out_norm(x)

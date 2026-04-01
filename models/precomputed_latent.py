@@ -124,6 +124,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         self._action_head_wandb_log = os.environ.get("ACTION_HEAD_WANDB_LOG", "1") == "1"
         if self.action_head_enabled:
             cfg = dict(action_head_cfg or {})
+            cfg["n_blocks"] = len(self.net.blocks)
             cfg.setdefault("video_hidden_dim", getattr(self.net, "model_channels", cfg.get("video_hidden_dim", 2048)))
             self.action_head = build_action_head(self.action_head_type, **cfg)
             if self.action_head_load_path and os.path.isfile(self.action_head_load_path):
@@ -275,10 +276,13 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         condition,
         action: Tensor | None = None,
         collect_last_hidden: bool = False,
-    ) -> tuple[torch.Tensor, Tensor | None]:
+    ) -> tuple[torch.Tensor, Tensor | list[Tensor] | None]:
         net_kwargs = condition.to_dict()
         if collect_last_hidden:
-            net_kwargs["intermediate_feature_ids"] = [len(self.net.blocks) - 1]
+            if getattr(self.action_head, "requires_video_hidden_layers", False):
+                net_kwargs["intermediate_feature_ids"] = list(range(len(self.net.blocks)))
+            else:
+                net_kwargs["intermediate_feature_ids"] = [len(self.net.blocks) - 1]
         net_kwargs = self._maybe_apply_action_conditioning(net_kwargs, action)
 
         net_out = self.net(
@@ -289,6 +293,8 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
         if collect_last_hidden:
             net_output_B_C_T_H_W, hidden_list = net_out
+            if getattr(self.action_head, "requires_video_hidden_layers", False):
+                return net_output_B_C_T_H_W.float(), hidden_list
             last_hidden = hidden_list[-1] if hidden_list else None
             return net_output_B_C_T_H_W.float(), last_hidden
         return net_out.float(), None
@@ -439,6 +445,20 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             hidden_grid = hidden_grid[:, num_cond : num_cond + num_pred]
         return hidden_grid.contiguous()
 
+    def _extract_action_head_video_hidden_layers(
+        self,
+        hidden_layers: list[Tensor] | tuple[Tensor, ...],
+        xt_B_C_T_H_W: Tensor,
+        num_cond: int,
+    ) -> list[Tensor]:
+        if not isinstance(hidden_layers, (list, tuple)) or len(hidden_layers) == 0:
+            raise ValueError("Expected non-empty list of video hidden layers.")
+        extracted_layers: list[Tensor] = []
+        for layer_hidden in hidden_layers:
+            hidden_grid = self._reshape_last_hidden(layer_hidden, xt_B_C_T_H_W)
+            extracted_layers.append(hidden_grid[:, :num_cond].contiguous())
+        return extracted_layers
+
     def _maybe_save_action_head(self, iteration: int) -> None:
         if not self.action_head_enabled or self.action_head is None:
             return
@@ -548,14 +568,24 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
         num_cond = int(getattr(self.config, "min_num_conditional_frames", 4))
         num_pred = max(1, actions.shape[1] // max(1, int(getattr(self.action_head, "actions_per_latent", 8))))
-        video_tokens = self._extract_action_head_video_tokens(last_hidden, xt_B_C_T_H_W, num_cond=num_cond, num_pred=num_pred)
-        if self.action_head_stop_gradient:
-            video_tokens = video_tokens.detach()
+        if getattr(self.action_head, "requires_video_hidden_layers", False):
+            video_tokens = self._extract_action_head_video_hidden_layers(last_hidden, xt_B_C_T_H_W, num_cond=num_cond)
+            if self.action_head_stop_gradient:
+                video_tokens = [layer.detach() for layer in video_tokens]
+        else:
+            video_tokens = self._extract_action_head_video_tokens(last_hidden, xt_B_C_T_H_W, num_cond=num_cond, num_pred=num_pred)
+            if self.action_head_stop_gradient:
+                video_tokens = video_tokens.detach()
 
         if self._action_head_debug and (not self._action_head_debug_printed) and self._is_rank0():
             print(
                 "[action-head][debug]",
-                f"actions={tuple(actions.shape)} video_tokens={tuple(video_tokens.shape)}",
+                (
+                    f"actions={tuple(actions.shape)} "
+                    f"video_tokens={tuple(video_tokens.shape)}"
+                    if torch.is_tensor(video_tokens)
+                    else f"video_layers={len(video_tokens)} first_layer={tuple(video_tokens[0].shape)}"
+                ),
                 flush=True,
             )
             self._action_head_debug_printed = True
