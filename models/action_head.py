@@ -44,6 +44,18 @@ def _sinusoidal_timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     return emb
 
 
+def _sinusoidal_position_embedding(pos: torch.Tensor, dim: int) -> torch.Tensor:
+    pos = pos.float()
+    half = dim // 2
+    device = pos.device
+    freq = torch.exp(-math.log(10000.0) * torch.arange(half, device=device).float() / max(half - 1, 1))
+    args = pos[:, None] * freq[None, :]
+    emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+    if dim % 2 == 1:
+        emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
+    return emb
+
+
 def _build_causal_self_mask(seq_len: int, device: torch.device) -> torch.Tensor:
     return torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=device), diagonal=1)
 
@@ -223,32 +235,60 @@ class FlowMatchingActionHead(nn.Module):
         temb = self.timestep_proj(temb).unsqueeze(1)
         return t_scalar, temb
 
-    def _prepare_video_tokens(self, video_tokens: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+    def _prepare_video_tokens(self, video_tokens: torch.Tensor) -> tuple[torch.Tensor, int, int, tuple[int, int] | None]:
         if video_tokens.ndim == 5:
             bsz, num_frames, h, w, hidden_dim = video_tokens.shape
             if hidden_dim != self.video_hidden_dim:
                 raise ValueError(
                     f"Expected video hidden dim {self.video_hidden_dim}, got {hidden_dim}"
                 )
-            return video_tokens.view(bsz, num_frames, h * w, hidden_dim), num_frames, h * w
+            return video_tokens.view(bsz, num_frames, h * w, hidden_dim), num_frames, h * w, (h, w)
         if video_tokens.ndim == 4:
             bsz, num_frames, tokens_per_frame, hidden_dim = video_tokens.shape
             if hidden_dim != self.video_hidden_dim:
                 raise ValueError(
                     f"Expected video hidden dim {self.video_hidden_dim}, got {hidden_dim}"
                 )
-            return video_tokens, num_frames, tokens_per_frame
+            return video_tokens, num_frames, tokens_per_frame, None
         if video_tokens.ndim == 3:
             bsz, num_video_tokens, hidden_dim = video_tokens.shape
             if hidden_dim != self.video_hidden_dim:
                 raise ValueError(
                     f"Expected video hidden dim {self.video_hidden_dim}, got {hidden_dim}"
                 )
-            return video_tokens.view(bsz, num_video_tokens, 1, hidden_dim), num_video_tokens, 1
+            return video_tokens.view(bsz, num_video_tokens, 1, hidden_dim), num_video_tokens, 1, None
         raise ValueError(
             "Expected video_tokens [B,T,D], [B,T,P,D], or [B,T,H,W,D], "
             f"got {tuple(video_tokens.shape)}"
         )
+
+    def _build_video_positional_encoding(
+        self,
+        batch_size: int,
+        num_frames: int,
+        tokens_per_frame: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        spatial_hw: tuple[int, int] | None,
+    ) -> torch.Tensor:
+        d_model = self.pos_embedding.embedding_dim
+        frame_idx = torch.arange(num_frames, device=device, dtype=torch.float32)
+        frame_emb = _sinusoidal_position_embedding(frame_idx, d_model).unsqueeze(1)
+
+        if spatial_hw is not None:
+            h, w = spatial_hw
+            y_idx = torch.arange(h, device=device, dtype=torch.float32)
+            x_idx = torch.arange(w, device=device, dtype=torch.float32)
+            y_emb = _sinusoidal_position_embedding(y_idx, d_model).unsqueeze(1).expand(h, w, d_model)
+            x_emb = _sinusoidal_position_embedding(x_idx, d_model).unsqueeze(0).expand(h, w, d_model)
+            spatial_emb = (y_emb + x_emb).reshape(1, h * w, d_model)
+        else:
+            token_idx = torch.arange(tokens_per_frame, device=device, dtype=torch.float32)
+            spatial_emb = _sinusoidal_position_embedding(token_idx, d_model).unsqueeze(0)
+
+        pos = frame_emb + spatial_emb
+        pos = pos.reshape(1, num_frames * tokens_per_frame, d_model)
+        return pos.expand(batch_size, -1, -1).to(dtype=dtype)
 
     def _get_masks(
         self,
@@ -299,8 +339,18 @@ class FlowMatchingActionHead(nn.Module):
         pos_ids = torch.arange(seq_len, dtype=torch.long, device=z_action.device)
         x = x + self.pos_embedding(pos_ids).unsqueeze(0) + temb.to(dtype=x.dtype)
 
-        video_tokens_grouped, num_frames, tokens_per_frame = self._prepare_video_tokens(video_tokens)
-        video_ctx = self.video_in(video_tokens_grouped.to(dtype=x.dtype).view(bsz, num_frames * tokens_per_frame, self.video_hidden_dim))
+        video_tokens_grouped, num_frames, tokens_per_frame, spatial_hw = self._prepare_video_tokens(video_tokens)
+        video_ctx = self.video_in(
+            video_tokens_grouped.to(dtype=x.dtype).view(bsz, num_frames * tokens_per_frame, self.video_hidden_dim)
+        )
+        video_ctx = video_ctx + self._build_video_positional_encoding(
+            batch_size=bsz,
+            num_frames=num_frames,
+            tokens_per_frame=tokens_per_frame,
+            device=x.device,
+            dtype=x.dtype,
+            spatial_hw=spatial_hw,
+        )
         state_tokens = None
         num_state_tokens = 0
         if self.use_state_condition:
