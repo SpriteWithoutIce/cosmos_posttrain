@@ -1,5 +1,8 @@
 # Action Head 改动说明（cosmos_posttrain）
 
+> 注：本文档记录的是旧版 `delta_v + MIP` 路线。当前代码已切到新版结构：
+> `action -> video timestep conditioner`、`last hidden state -> flow-matching action head`、`action head stop-grad to video`，并支持通过注册/工厂扩展。
+
 ## 改动文件
 - `models/action_head.py`
 - `models/precomputed_latent.py`

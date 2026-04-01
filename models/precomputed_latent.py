@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import random
+
 import torch
 import torch.nn.functional as F
-from torch.distributions import Beta
-from torch import Tensor
 from einops import rearrange
+from torch import Tensor
+from torch.distributions import Beta
 
 from cosmos_predict2._src.imaginaire.lazy_config import LazyDict
 from cosmos_predict2._src.imaginaire.utils.optim_instantiate import get_base_scheduler
@@ -16,7 +17,7 @@ from cosmos_predict2._src.predict2.models.video2world_model_rectified_flow impor
     NUM_CONDITIONAL_FRAMES_KEY,
     Video2WorldModelRectifiedFlow,
 )
-from models.action_head import ActionMIPHead
+from models.action_head import build_action_head
 
 
 class IdentityLatentTokenizer(torch.nn.Module):
@@ -82,16 +83,17 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         self,
         *args,
         action_head_enabled: bool = False,
+        action_head_type: str = "flow_matching",
         action_head_cfg: dict | None = None,
         action_head_lr: float = 1e-4,
         action_loss_weight: float = 1.0,
-        action_delta_video_t: float = 0.5,
-        action_head_timestep_mode: str = "beta",
-        action_head_fixed_timestep: int = 0,
-        action_head_mip_gt_mix: float = 0.9,
+        action_head_timestep_mode: str = "uniform",
+        action_head_fixed_timestep: float = 0.0,
         action_head_noise_beta_alpha: float = 1.5,
         action_head_noise_beta_beta: float = 1.0,
-        action_head_noise_s: float = 0.999,
+        action_head_noise_beta_s: float = 0.999,
+        action_head_stop_gradient: bool = True,
+        action_head_video_hidden_pred_only: bool = True,
         action_head_save_every: int = 0,
         action_head_save_dir: str | None = None,
         action_head_load_path: str | None = None,
@@ -100,15 +102,16 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         super().__init__(*args, **kwargs)
 
         self.action_head_enabled = bool(action_head_enabled)
+        self.action_head_type = str(action_head_type)
         self.action_head_lr = float(action_head_lr)
         self.action_loss_weight = float(action_loss_weight)
-        self.action_delta_video_t = float(action_delta_video_t)
         self.action_head_timestep_mode = str(action_head_timestep_mode)
-        self.action_head_fixed_timestep = int(action_head_fixed_timestep)
-        self.action_head_mip_gt_mix = float(action_head_mip_gt_mix)
+        self.action_head_fixed_timestep = float(action_head_fixed_timestep)
         self.action_head_noise_beta_alpha = float(action_head_noise_beta_alpha)
         self.action_head_noise_beta_beta = float(action_head_noise_beta_beta)
-        self.action_head_noise_s = float(action_head_noise_s)
+        self.action_head_noise_beta_s = float(action_head_noise_beta_s)
+        self.action_head_stop_gradient = bool(action_head_stop_gradient)
+        self.action_head_video_hidden_pred_only = bool(action_head_video_hidden_pred_only)
         self._action_beta_dist = Beta(self.action_head_noise_beta_alpha, self.action_head_noise_beta_beta)
         self.action_head_save_every = int(action_head_save_every)
         self.action_head_save_dir = action_head_save_dir
@@ -121,14 +124,14 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         self._action_head_wandb_log = os.environ.get("ACTION_HEAD_WANDB_LOG", "1") == "1"
         if self.action_head_enabled:
             cfg = dict(action_head_cfg or {})
-            self.action_head = ActionMIPHead(**cfg)
+            cfg.setdefault("video_hidden_dim", getattr(self.net, "model_channels", cfg.get("video_hidden_dim", 2048)))
+            self.action_head = build_action_head(self.action_head_type, **cfg)
             if self.action_head_load_path and os.path.isfile(self.action_head_load_path):
                 self.load_action_head(self.action_head_load_path, strict=True)
 
     def init_optimizer_scheduler(
         self, optimizer_config: LazyDict, scheduler_config: LazyDict
     ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
-        # keep default behavior if action head is disabled
         if not self.action_head_enabled or self.action_head is None:
             return super().init_optimizer_scheduler(optimizer_config, scheduler_config)
 
@@ -172,15 +175,11 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         return optimizer, scheduler
 
     def _normalize_video_databatch_inplace(self, data_batch: dict[str, Tensor], input_key: str = None) -> None:
-        # Sampling callbacks call this before generation. For latent-direct training,
-        # the "video" tensor is already latent, not uint8 pixels.
         del input_key
         return
 
     @torch.no_grad()
     def generate_samples_from_batch(self, data_batch: dict, **kwargs) -> torch.Tensor:
-        # Callback does not pass seed; use random seed each call so repeated guidance
-        # entries can generate multiple diverse open-loop samples.
         if "seed" not in kwargs or kwargs["seed"] is None:
             kwargs["seed"] = random.randint(1, 2**31 - 1)
         return super().generate_samples_from_batch(data_batch, **kwargs)
@@ -194,11 +193,8 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         if input_key not in data_batch:
             raise KeyError(f"Missing required key '{input_key}' in batch")
 
-        # Precomputed latents are already model-ready; skip normalization and VAE encoding.
         latent_state = data_batch[input_key].to(**self.tensor_kwargs).contiguous().float()
         raw_state = latent_state
-        # EveryNDrawSample stacks generated sample with raw_data for visualization.
-        # Decode raw latents only in no-grad context (sampling callbacks) to avoid training overhead.
         if not torch.is_grad_enabled():
             raw_state = self.decode(latent_state).contiguous().float()
 
@@ -219,15 +215,19 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
             return sd
         return {k: v for k, v in sd.items() if not k.startswith("action_head.")}
 
-    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False, **kwargs):
-        if not self.action_head_enabled:
-            return super().load_state_dict(state_dict, strict=strict, assign=assign, **kwargs)
+    def _is_ignorable_missing_key(self, key: str) -> bool:
+        ignored_prefixes = (
+            "action_head.",
+            "net.video_action_conditioner.",
+            "net_ema.video_action_conditioner.",
+        )
+        return key.startswith(ignored_prefixes)
 
-        # Keep video checkpoint strictness while allowing action_head to be absent.
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False, **kwargs):
         result = super().load_state_dict(state_dict, strict=False, assign=assign, **kwargs)
         if strict:
-            missing = [k for k in result.missing_keys if not k.startswith("action_head.")]
-            unexpected = [k for k in result.unexpected_keys if not k.startswith("action_head.")]
+            missing = [k for k in result.missing_keys if not self._is_ignorable_missing_key(k)]
+            unexpected = [k for k in result.unexpected_keys if not self._is_ignorable_missing_key(k)]
             if missing or unexpected:
                 raise RuntimeError(
                     f"Error(s) in loading state_dict for {self.__class__.__name__}: "
@@ -243,91 +243,203 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
 
     @staticmethod
     def _extract_velocity_tensor(output_batch: dict) -> Tensor | None:
-        # Per cosmos_predict2._src.predict2.models.text2world_model_rectified_flow.forward,
-        # RF velocity prediction is stored in output_batch["model_pred"].
         v = output_batch.get("model_pred", None)
         if torch.is_tensor(v) and v.ndim == 5:
             return v
         return None
 
-    def _compute_delta_v(self, output_batch: dict, num_cond: int, num_pred: int) -> Tensor:
-        v_pred = self._extract_velocity_tensor(output_batch)
-        if v_pred is None:
-            if self._action_head_debug and self._is_rank0():
-                print(
-                    "[action-head][debug] output_batch keys:",
-                    sorted(list(output_batch.keys())),
-                    flush=True,
-                )
-                tensor_items = []
-                for k, v in output_batch.items():
-                    if torch.is_tensor(v):
-                        tensor_items.append((k, tuple(v.shape), str(v.dtype)))
-                print("[action-head][debug] output tensors:", tensor_items, flush=True)
-            raise KeyError(
-                "Cannot find predicted velocity tensor in output_batch['model_pred']."
-            )
-        # v_pred: [B, C, T, H, W]
-        t_total = v_pred.shape[2]
-        if num_cond + num_pred > t_total:
-            raise ValueError(f"Invalid cond/pred split: cond={num_cond}, pred={num_pred}, total={t_total}")
-        pred_v = v_pred[:, :, num_cond : num_cond + num_pred, :, :]
-        prev_v = v_pred[:, :, num_cond - 1 : num_cond + num_pred - 1, :, :]
-        delta_v = pred_v - prev_v  # [B, C, 8, H, W]
-        return rearrange(delta_v, "b c t h w -> b t c h w").contiguous()
+    @staticmethod
+    def _prepare_batch_actions(data_batch: dict, device: torch.device | None = None) -> Tensor | None:
+        actions = data_batch.get("actions", None)
+        if actions is None:
+            return None
+        if not torch.is_tensor(actions):
+            raise TypeError(f"Expected 'actions' to be a tensor, got {type(actions)}")
+        actions = actions.float()
+        if device is not None:
+            actions = actions.to(device=device)
+        return actions
 
-    def _compute_delta_v_at_fixed_video_t(self, output_batch: dict, num_cond: int, num_pred: int) -> Tensor:
-        """
-        Build an extra RF denoise pass at fixed video-time t for action branch.
-        This branch keeps gradient to video net so action loss can update video model.
-        """
-        if "x0" not in output_batch or "condition" not in output_batch:
-            raise KeyError("output_batch missing 'x0' or 'condition' for fixed-t action delta_v computation.")
+    def _maybe_apply_action_conditioning(self, net_kwargs: dict, action: Tensor | None) -> dict:
+        if action is None:
+            return net_kwargs
+        if getattr(self.net, "supports_action_conditioning", False):
+            net_kwargs = dict(net_kwargs)
+            net_kwargs["action"] = action.to(**self.tensor_kwargs)
+        return net_kwargs
 
-        x0 = output_batch["x0"]
-        condition = output_batch["condition"]
-        batch_size = x0.shape[0]
+    def _forward_net(
+        self,
+        xt_B_C_T_H_W: torch.Tensor,
+        timesteps_B_T: torch.Tensor,
+        condition,
+        action: Tensor | None = None,
+        collect_last_hidden: bool = False,
+    ) -> tuple[torch.Tensor, Tensor | None]:
+        net_kwargs = condition.to_dict()
+        if collect_last_hidden:
+            net_kwargs["intermediate_feature_ids"] = [len(self.net.blocks) - 1]
+        net_kwargs = self._maybe_apply_action_conditioning(net_kwargs, action)
 
-        t_fix = max(0.0, min(1.0, self.action_delta_video_t))
-        t_B = torch.full((batch_size, 1), t_fix, device=x0.device, dtype=torch.float32)
-        timesteps = self.rectified_flow.get_discrete_timestamp(t_B, self.tensor_kwargs_fp32)
-        sigmas = self.rectified_flow.get_sigmas(timesteps, self.tensor_kwargs_fp32)
-        timesteps = timesteps.view(batch_size, 1)
-        sigmas = sigmas.view(batch_size, 1)
-
-        # fresh noise for fixed-t branch
-        epsilon = torch.randn_like(x0, dtype=torch.float32)
-        xt_fix, _ = self.rectified_flow.get_interpolation(epsilon, x0.to(dtype=torch.float32), sigmas)
-        v_pred_fix = self.denoise(
-            noise=epsilon,
-            xt_B_C_T_H_W=xt_fix.to(**self.tensor_kwargs),
-            timesteps_B_T=timesteps,
-            condition=condition,
+        net_out = self.net(
+            x_B_C_T_H_W=xt_B_C_T_H_W.to(**self.tensor_kwargs),
+            timesteps_B_T=timesteps_B_T,
+            **net_kwargs,
         )
 
-        pred_v = v_pred_fix[:, :, num_cond : num_cond + num_pred, :, :]
-        prev_v = v_pred_fix[:, :, num_cond - 1 : num_cond + num_pred - 1, :, :]
-        delta_v = pred_v - prev_v  # [B, C, 8, H, W]
-        return rearrange(delta_v, "b c t h w -> b t c h w").contiguous()
+        if collect_last_hidden:
+            net_output_B_C_T_H_W, hidden_list = net_out
+            last_hidden = hidden_list[-1] if hidden_list else None
+            return net_output_B_C_T_H_W.float(), last_hidden
+        return net_out.float(), None
 
-    def _sample_action_head_timestep(self, batch_size: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-        buckets = int(getattr(self.action_head, "timestep_buckets", 1000))
+    def denoise(
+        self,
+        noise: torch.Tensor,
+        xt_B_C_T_H_W: torch.Tensor,
+        timesteps_B_T: torch.Tensor,
+        condition,
+        action: Tensor | None = None,
+        collect_last_hidden: bool = False,
+    ):
+        if condition.is_video:
+            condition_state_in_B_C_T_H_W = condition.gt_frames.type_as(xt_B_C_T_H_W)
+            if not condition.use_video_condition:
+                condition_state_in_B_C_T_H_W = condition_state_in_B_C_T_H_W * 0
+
+            _, c_channels, _, _, _ = xt_B_C_T_H_W.shape
+            condition_video_mask = condition.condition_video_input_mask_B_C_T_H_W.repeat(1, c_channels, 1, 1, 1).type_as(
+                xt_B_C_T_H_W
+            )
+            xt_B_C_T_H_W = condition_state_in_B_C_T_H_W * condition_video_mask + xt_B_C_T_H_W * (1 - condition_video_mask)
+
+            if self.config.conditional_frame_timestep >= 0:
+                condition_video_mask_B_1_T_1_1 = condition_video_mask.mean(dim=[1, 3, 4], keepdim=True)
+                timestep_cond_B_1_T_1_1 = (
+                    torch.ones_like(condition_video_mask_B_1_T_1_1) * self.config.conditional_frame_timestep
+                )
+                timesteps_B_1_T_1_1 = timestep_cond_B_1_T_1_1 * condition_video_mask_B_1_T_1_1 + timesteps_B_T * (
+                    1 - condition_video_mask_B_1_T_1_1
+                )
+                timesteps_B_T = timesteps_B_1_T_1_1.squeeze()
+                timesteps_B_T = timesteps_B_T.unsqueeze(0) if timesteps_B_T.ndim == 1 else timesteps_B_T
+
+        net_output_B_C_T_H_W, last_hidden = self._forward_net(
+            xt_B_C_T_H_W=xt_B_C_T_H_W,
+            timesteps_B_T=timesteps_B_T,
+            condition=condition,
+            action=action,
+            collect_last_hidden=collect_last_hidden,
+        )
+
+        if condition.is_video and self.config.denoise_replace_gt_frames:
+            gt_frames_x0 = condition.gt_frames.type_as(net_output_B_C_T_H_W)
+            gt_frames_velocity = noise - gt_frames_x0
+            net_output_B_C_T_H_W = gt_frames_velocity * condition_video_mask + net_output_B_C_T_H_W * (1 - condition_video_mask)
+
+        if collect_last_hidden:
+            return net_output_B_C_T_H_W, last_hidden
+        return net_output_B_C_T_H_W
+
+    def get_velocity_fn_from_batch(
+        self,
+        data_batch: dict,
+        guidance: float = 1.5,
+        is_negative_prompt: bool = False,
+    ):
+        if NUM_CONDITIONAL_FRAMES_KEY in data_batch:
+            num_conditional_frames = data_batch[NUM_CONDITIONAL_FRAMES_KEY]
+        else:
+            num_conditional_frames = 1
+
+        if is_negative_prompt:
+            condition, uncondition = self.conditioner.get_condition_with_negative_prompt(data_batch)
+        else:
+            condition, uncondition = self.conditioner.get_condition_uncondition(data_batch)
+
+        action = self._prepare_batch_actions(data_batch, device=self.tensor_kwargs["device"])
+        is_image_batch = self.is_image_batch(data_batch)
+        condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
+        uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
+        _, x0, _ = self.get_data_and_condition(data_batch)
+        condition = condition.set_video_condition(
+            gt_frames=x0,
+            random_min_num_conditional_frames=self.config.min_num_conditional_frames,
+            random_max_num_conditional_frames=self.config.max_num_conditional_frames,
+            num_conditional_frames=num_conditional_frames,
+            conditional_frames_probs=self.config.conditional_frames_probs,
+        )
+        uncondition = uncondition.set_video_condition(
+            gt_frames=x0,
+            random_min_num_conditional_frames=self.config.min_num_conditional_frames,
+            random_max_num_conditional_frames=self.config.max_num_conditional_frames,
+            num_conditional_frames=num_conditional_frames,
+            conditional_frames_probs=self.config.conditional_frames_probs,
+        )
+        condition = condition.edit_for_inference(is_cfg_conditional=True, num_conditional_frames=num_conditional_frames)
+        uncondition = uncondition.edit_for_inference(
+            is_cfg_conditional=False, num_conditional_frames=num_conditional_frames
+        )
+
+        _, condition, _, _ = self.broadcast_split_for_model_parallelsim(x0, condition, None, None)
+        _, uncondition, _, _ = self.broadcast_split_for_model_parallelsim(x0, uncondition, None, None)
+
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            assert not self.net.is_context_parallel_enabled, (
+                "parallel_state is not initialized, context parallel should be turned off."
+            )
+
+        def velocity_fn(noise: torch.Tensor, noise_x: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+            cond_v = self.denoise(noise, noise_x, timestep, condition, action=action)
+            uncond_v = self.denoise(noise, noise_x, timestep, uncondition, action=action)
+            velocity_pred = cond_v + guidance * (cond_v - uncond_v)
+            return velocity_pred
+
+        return velocity_fn
+
+    def _sample_action_head_timestep(self, batch_size: int, device: torch.device) -> Tensor:
         mode = self.action_head_timestep_mode.lower()
         if mode == "fixed":
-            t = max(0, min(buckets - 1, int(self.action_head_fixed_timestep)))
-            t_disc = torch.full((batch_size,), t, device=device, dtype=torch.long)
-            t_cont = t_disc.float() / max(buckets - 1, 1)
-            return t_cont, t_disc
-        if mode == "random":
-            t_cont = torch.rand(batch_size, device=device, dtype=torch.float32)
-            t_disc = torch.clamp((t_cont * buckets).long(), 0, buckets - 1)
-            return t_cont, t_disc
-        # default: beta continuous sampling then discretize (reasoningVLA style)
-        sample = self._action_beta_dist.sample([batch_size]).to(device=device, dtype=torch.float32)
-        t_cont = (self.action_head_noise_s - sample) / self.action_head_noise_s
-        t_cont = torch.clamp(t_cont, 0.0, 1.0)
-        t_disc = torch.clamp((t_cont * buckets).long(), 0, buckets - 1)
-        return t_cont, t_disc
+            t = float(self.action_head_fixed_timestep)
+            buckets = float(getattr(self.action_head, "timestep_buckets", 1000) - 1)
+            if t > 1.0 and buckets > 0:
+                t = t / buckets
+            return torch.full((batch_size,), max(0.0, min(1.0, t)), device=device, dtype=torch.float32)
+        if mode in {"random", "uniform"}:
+            return torch.rand(batch_size, device=device, dtype=torch.float32)
+        if mode == "beta":
+            sample = self._action_beta_dist.sample([batch_size]).to(device=device, dtype=torch.float32)
+            t_cont = (self.action_head_noise_beta_s - sample) / self.action_head_noise_beta_s
+            return torch.clamp(t_cont, 0.0, 1.0)
+        raise ValueError(f"Unsupported action head timestep mode: {self.action_head_timestep_mode}")
+
+    def _reshape_last_hidden(self, last_hidden: Tensor, xt_B_C_T_H_W: Tensor) -> Tensor:
+        if last_hidden.ndim != 3:
+            raise ValueError(f"Expected last_hidden [B,N,D], got {tuple(last_hidden.shape)}")
+        patch_t = int(getattr(self.net, "patch_temporal", 1))
+        patch_s = int(getattr(self.net, "patch_spatial", 1))
+        t = xt_B_C_T_H_W.shape[2] // patch_t
+        h = xt_B_C_T_H_W.shape[3] // patch_s
+        w = xt_B_C_T_H_W.shape[4] // patch_s
+        expected_tokens = t * h * w
+        if last_hidden.shape[1] != expected_tokens:
+            raise ValueError(
+                f"Last hidden token count mismatch: got {last_hidden.shape[1]}, expected {expected_tokens} "
+                f"for latent grid {(t, h, w)}"
+            )
+        return last_hidden.view(last_hidden.shape[0], t, h, w, last_hidden.shape[-1])
+
+    def _extract_action_head_video_tokens(
+        self,
+        last_hidden: Tensor,
+        xt_B_C_T_H_W: Tensor,
+        num_cond: int,
+        num_pred: int,
+    ) -> Tensor:
+        hidden_grid = self._reshape_last_hidden(last_hidden, xt_B_C_T_H_W)
+        if self.action_head_video_hidden_pred_only:
+            hidden_grid = hidden_grid[:, num_cond : num_cond + num_pred]
+        return hidden_grid.contiguous()
 
     def _maybe_save_action_head(self, iteration: int) -> None:
         if not self.action_head_enabled or self.action_head is None:
@@ -359,72 +471,128 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         self.action_head.load_state_dict(sd, strict=strict)
         print(f"[action-head] loaded: {checkpoint_path}", flush=True)
 
+    def _forward_video_training(
+        self,
+        data_batch: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, Tensor | None, Tensor]:
+        if self.text_encoder is not None and self.config.text_encoder_config.compute_online:
+            text_embeddings = self.text_encoder.compute_text_embeddings_online(data_batch, self.input_caption_key)
+            data_batch["t5_text_embeddings"] = text_embeddings
+            data_batch["t5_text_mask"] = torch.ones(text_embeddings.shape[0], text_embeddings.shape[1], device="cuda")
+
+        _, x0_B_C_T_H_W, condition = self.get_data_and_condition(data_batch)
+        epsilon_B_C_T_H_W = torch.randn(x0_B_C_T_H_W.size(), **self.tensor_kwargs_fp32)
+        batch_size = x0_B_C_T_H_W.size()[0]
+        t_B = self.rectified_flow.sample_train_time(batch_size).to(**self.tensor_kwargs_fp32)
+        t_B = rearrange(t_B, "b -> b 1")
+
+        x0_B_C_T_H_W, condition, epsilon_B_C_T_H_W, t_B = self.broadcast_split_for_model_parallelsim(
+            x0_B_C_T_H_W, condition, epsilon_B_C_T_H_W, t_B
+        )
+        timesteps = self.rectified_flow.get_discrete_timestamp(t_B, self.tensor_kwargs_fp32)
+
+        if self.config.use_high_sigma_strategy:
+            raise NotImplementedError("High sigma strategy is buggy when using CP")
+
+        sigmas = self.rectified_flow.get_sigmas(timesteps, self.tensor_kwargs_fp32)
+        timesteps = rearrange(timesteps, "b -> b 1")
+        sigmas = rearrange(sigmas, "b -> b 1")
+        xt_B_C_T_H_W, vt_B_C_T_H_W = self.rectified_flow.get_interpolation(epsilon_B_C_T_H_W, x0_B_C_T_H_W, sigmas)
+
+        actions = self._prepare_batch_actions(data_batch, device=xt_B_C_T_H_W.device)
+        vt_pred_B_C_T_H_W, last_hidden = self.denoise(
+            noise=epsilon_B_C_T_H_W,
+            xt_B_C_T_H_W=xt_B_C_T_H_W.to(**self.tensor_kwargs),
+            timesteps_B_T=timesteps,
+            condition=condition,
+            action=actions,
+            collect_last_hidden=self.action_head_enabled and self.action_head is not None,
+        )
+
+        time_weights_B = self.rectified_flow.train_time_weight(timesteps, self.tensor_kwargs_fp32)
+        per_instance_loss = torch.mean(
+            (vt_pred_B_C_T_H_W - vt_B_C_T_H_W) ** 2, dim=list(range(1, vt_pred_B_C_T_H_W.dim()))
+        )
+        loss = torch.mean(time_weights_B * per_instance_loss)
+        output_batch = {
+            "x0": x0_B_C_T_H_W,
+            "xt": xt_B_C_T_H_W,
+            "sigma": sigmas,
+            "condition": condition,
+            "model_pred": vt_pred_B_C_T_H_W,
+            "edm_loss": loss,
+            "timesteps": timesteps,
+            "per_instance_loss": per_instance_loss,
+            "n_cond_frames": condition.num_conditional_frames_B,
+        }
+        return output_batch, loss, last_hidden, xt_B_C_T_H_W
+
     def training_step(self, data_batch: dict, iteration: int = 0):
-        output_batch, loss = super().training_step(data_batch, iteration)
+        output_batch, loss, last_hidden, xt_B_C_T_H_W = self._forward_video_training(data_batch)
         if not self.action_head_enabled or self.action_head is None:
             return output_batch, loss
 
         actions = data_batch.get("actions", None)
-        states = data_batch.get("states", None)
-        if actions is None or states is None:
-            raise KeyError("Action head enabled, but batch is missing 'actions' or 'states'.")
-        if actions.ndim != 3 or states.ndim != 2:
-            raise ValueError(f"Invalid action/state shapes: actions={tuple(actions.shape)}, states={tuple(states.shape)}")
-
+        if actions is None:
+            raise KeyError("Action head enabled, but batch is missing 'actions'.")
+        if not torch.is_tensor(actions) or actions.ndim != 3:
+            raise ValueError(f"Invalid action shape: {None if actions is None else tuple(actions.shape)}")
         actions = actions.to(loss.device).float()
-        states = states.to(loss.device).float()
+
+        states = data_batch.get("states", None)
+        if states is not None:
+            if not torch.is_tensor(states) or states.ndim != 2:
+                raise ValueError(f"Invalid state shape: {tuple(states.shape)}")
+            states = states.to(loss.device).float()
+
+        if last_hidden is None:
+            raise RuntimeError("Action head requires the last hidden state from the video network, but none was returned.")
 
         num_cond = int(getattr(self.config, "min_num_conditional_frames", 4))
-        num_pred = 8
-        if self.action_delta_video_t >= 0.0:
-            delta_v = self._compute_delta_v_at_fixed_video_t(output_batch, num_cond=num_cond, num_pred=num_pred).to(
-                loss.device
-            )
-        else:
-            delta_v = self._compute_delta_v(output_batch, num_cond=num_cond, num_pred=num_pred).to(loss.device)
+        num_pred = max(1, actions.shape[1] // max(1, int(getattr(self.action_head, "actions_per_latent", 8))))
+        video_tokens = self._extract_action_head_video_tokens(last_hidden, xt_B_C_T_H_W, num_cond=num_cond, num_pred=num_pred)
+        if self.action_head_stop_gradient:
+            video_tokens = video_tokens.detach()
+
         if self._action_head_debug and (not self._action_head_debug_printed) and self._is_rank0():
             print(
                 "[action-head][debug]",
-                f"actions={tuple(actions.shape)} states={tuple(states.shape)} delta_v={tuple(delta_v.shape)}",
+                f"actions={tuple(actions.shape)} video_tokens={tuple(video_tokens.shape)}",
                 flush=True,
             )
             self._action_head_debug_printed = True
 
-        action_t2_cont, action_t2 = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
-        action_t1 = torch.zeros_like(action_t2)
+        action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
         noise = torch.randn_like(actions)
-        z1 = noise
-        z2 = self.action_head_mip_gt_mix * actions + (1.0 - self.action_head_mip_gt_mix) * noise
+        interp = action_t.view(-1, 1, 1)
+        z_t = (1.0 - interp) * noise + interp * actions
+        target_velocity = actions - noise
 
-        pred1 = self.action_head(z1, delta_v, states, timestep=action_t1)
-        pred2 = self.action_head(z2, delta_v, states, timestep=action_t2)
+        pred_velocity = self.action_head(
+            z_t,
+            video_tokens,
+            state_vec=states if getattr(self.action_head, "use_state_condition", False) else None,
+            timestep=action_t,
+        )
 
-        action_loss_1 = F.mse_loss(pred1, actions)
-        action_loss_2 = F.mse_loss(pred2, actions)
-        action_loss = action_loss_1 + action_loss_2
+        action_loss = F.mse_loss(pred_velocity, target_velocity)
         total_loss = loss + self.action_loss_weight * action_loss
 
-        output_batch["action_loss_1"] = action_loss_1.detach()
-        output_batch["action_loss_2"] = action_loss_2.detach()
         output_batch["action_loss"] = action_loss.detach()
         output_batch["video_loss"] = loss.detach()
         output_batch["total_loss"] = total_loss.detach()
-        output_batch["metrics/action_loss_1"] = output_batch["action_loss_1"]
-        output_batch["metrics/action_loss_2"] = output_batch["action_loss_2"]
         output_batch["metrics/action_loss"] = output_batch["action_loss"]
         output_batch["metrics/video_loss"] = output_batch["video_loss"]
         output_batch["metrics/total_loss"] = output_batch["total_loss"]
-        output_batch["metrics/action_timestep_mean"] = action_t2_cont.detach().mean()
+        output_batch["metrics/action_timestep_mean"] = action_t.detach().mean()
 
         if self._is_rank0() and self._action_head_log_every > 0 and iteration % self._action_head_log_every == 0:
             print(
                 (
                     f"[action-head] iter={iteration} "
                     f"video_loss={float(loss.detach().item()):.6f} "
-                    f"action_loss_1={float(action_loss_1.detach().item()):.6f} "
-                    f"action_loss_2={float(action_loss_2.detach().item()):.6f} "
                     f"action_loss={float(action_loss.detach().item()):.6f} "
-                    f"action_t2={float(action_t2_cont.detach().mean().item()):.4f} "
+                    f"action_t={float(action_t.detach().mean().item()):.4f} "
                     f"total_loss={float(total_loss.detach().item()):.6f}"
                 ),
                 flush=True,
@@ -437,10 +605,8 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                         wandb.log(
                             {
                                 "train/video_loss": float(loss.detach().item()),
-                                "train/action_loss_1": float(action_loss_1.detach().item()),
-                                "train/action_loss_2": float(action_loss_2.detach().item()),
                                 "train/action_loss": float(action_loss.detach().item()),
-                                "train/action_timestep_mean": float(action_t2_cont.detach().mean().item()),
+                                "train/action_timestep_mean": float(action_t.detach().mean().item()),
                                 "train/total_loss": float(total_loss.detach().item()),
                             },
                             step=int(iteration),

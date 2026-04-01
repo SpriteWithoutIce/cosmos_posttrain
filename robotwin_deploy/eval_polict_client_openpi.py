@@ -137,6 +137,19 @@ def add_init_pose(new_pose, init_pose):
     return np.concatenate([left, right])
 
 
+def parse_action_steps(action: np.ndarray) -> list[np.ndarray]:
+    action = np.asarray(action)
+    if action.ndim == 2 and action.shape[1] == 16:
+        return [action[i].astype(np.float32) for i in range(action.shape[0])]
+    if action.ndim == 3:
+        out = []
+        for i in range(action.shape[1]):
+            for j in range(action.shape[2]):
+                out.append(action[:, i, j].astype(np.float32))
+        return out
+    raise ValueError(f"Unexpected action shape: {action.shape}")
+
+
 def write_json(data: dict, fpath: Path):
     fpath.parent.mkdir(exist_ok=True, parents=True)
     with open(fpath, "w") as f:
@@ -270,44 +283,40 @@ def eval_policy(
             observation = TASK_ENV.get_obs()
             obs_dict = format_obs(observation, prompt)
 
-            ret = model.infer({"obs": obs_dict, "prompt": prompt})
-            action = ret["action"]  # (action_dim, F_half, N)
-            # print(action.shape)
+            print(f"[Client] obs_dict: {obs_dict['observation.state']}")
 
-            for i in range(action.shape[1]):
-                for j in range(action.shape[2]):
-                    if TASK_ENV.take_action_cnt >= TASK_ENV.step_lim:
-                        break
+            ret = model.infer({"obs": obs_dict, "prompt": prompt, "task_name": task_name})
+            action_steps = parse_action_steps(ret["action"])
+            key_frame_list = []
 
-                    ee_action = action[:, i, j].copy()
+            action_steps = action_steps[:32]
 
-                    if action.shape[0] == 16:
-                        # ee_action = add_init_pose(ee_action, init_eef)
-                        ee_action = np.concatenate([
-                            ee_action[:3],
-                            ee_action[3:7] / np.linalg.norm(ee_action[3:7]),
-                            ee_action[7:11],
-                            ee_action[11:15] / np.linalg.norm(ee_action[11:15]),
-                            ee_action[15:16],
-                        ])
-                    elif action.shape[0] == 14:
-                        from evaluation.robotwin.geometry import euler2quat
-                        ee_action = np.concatenate([
-                            ee_action[:3],
-                            euler2quat(ee_action[3], ee_action[4], ee_action[5]),
-                            ee_action[6:10],
-                            euler2quat(ee_action[10], ee_action[11], ee_action[12]),
-                            ee_action[13:14],
-                        ])
-                    else:
-                        raise NotImplementedError(f"action_dim={action.shape[0]} not supported")
-
-                    TASK_ENV.take_action(ee_action, action_type="ee")
-
-                    full_obs_list.append(format_obs(TASK_ENV.get_obs(), prompt))
-
+            for step_i, step_action in enumerate(action_steps):
                 if TASK_ENV.take_action_cnt >= TASK_ENV.step_lim:
                     break
+
+                ee_action = np.asarray(step_action, dtype=np.float32).reshape(-1)
+                # print(f"[Client] step_action: {step_action}")
+                if ee_action.shape[0] != 16:
+                    raise NotImplementedError(f"Expected 16-dim action, got {ee_action.shape[0]}")
+
+                TASK_ENV.take_action(ee_action, action_type="ee")
+                obs_after = format_obs(TASK_ENV.get_obs(), prompt)
+                full_obs_list.append(obs_after)
+                if (step_i + 1) % 2 == 0:
+                    key_frame_list.append(obs_after)
+                if TASK_ENV.eval_success:
+                    break
+
+            if key_frame_list:
+                model.infer(
+                    {
+                        "obs": key_frame_list,
+                        "compute_kv_cache": True,
+                        "prompt": prompt,
+                        "task_name": task_name,
+                    }
+                )
 
             if TASK_ENV.eval_success:
                 succ = True

@@ -1,10 +1,33 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Tuple
+from typing import Callable, Dict, Tuple
 
 import torch
 import torch.nn as nn
+
+
+ActionHeadBuilder = Callable[..., nn.Module]
+_ACTION_HEAD_REGISTRY: Dict[str, ActionHeadBuilder] = {}
+
+
+def register_action_head(name: str) -> Callable[[ActionHeadBuilder], ActionHeadBuilder]:
+    def decorator(builder: ActionHeadBuilder) -> ActionHeadBuilder:
+        key = str(name).lower()
+        if key in _ACTION_HEAD_REGISTRY:
+            raise ValueError(f"Action head '{name}' is already registered.")
+        _ACTION_HEAD_REGISTRY[key] = builder
+        return builder
+
+    return decorator
+
+
+def build_action_head(name: str, **kwargs) -> nn.Module:
+    key = str(name).lower()
+    if key not in _ACTION_HEAD_REGISTRY:
+        available = ", ".join(sorted(_ACTION_HEAD_REGISTRY)) or "<empty>"
+        raise ValueError(f"Unknown action head '{name}'. Available: {available}")
+    return _ACTION_HEAD_REGISTRY[key](**kwargs)
 
 
 def _sinusoidal_timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
@@ -22,12 +45,20 @@ def _sinusoidal_timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
 
 
 def _build_causal_self_mask(seq_len: int, device: torch.device) -> torch.Tensor:
-    # float mask for nn.MultiheadAttention: 0 means keep, -inf means masked.
     return torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=device), diagonal=1)
 
 
+def _build_block_causal_self_mask(seq_len: int, block_size: int, device: torch.device) -> torch.Tensor:
+    mask = torch.full((seq_len, seq_len), float("-inf"), device=device)
+    block_size = max(int(block_size), 1)
+    for q_idx in range(seq_len):
+        current_block = q_idx // block_size
+        allowed_until = min(seq_len, (current_block + 1) * block_size)
+        mask[q_idx, :allowed_until] = 0.0
+    return mask
+
+
 def _build_causal_cross_mask(num_q: int, num_kv: int, actions_per_kv: int, device: torch.device) -> torch.Tensor:
-    # action token j can attend to kv 0..j//actions_per_kv
     mask = torch.full((num_q, num_kv), float("-inf"), device=device)
     for j in range(num_q):
         allowed = j // max(actions_per_kv, 1) + 1
@@ -35,41 +66,28 @@ def _build_causal_cross_mask(num_q: int, num_kv: int, actions_per_kv: int, devic
     return mask
 
 
-def _build_causal_cross_mask_grouped(
-    num_q: int,
-    num_frames: int,
-    tokens_per_frame: int,
-    actions_per_frame: int,
-    device: torch.device,
-) -> torch.Tensor:
-    # query j can attend to delta_v tokens from frames [0 .. floor(j/actions_per_frame)]
-    num_kv = num_frames * tokens_per_frame
-    mask = torch.full((num_q, num_kv), float("-inf"), device=device)
-    for j in range(num_q):
-        allowed_frames = min(num_frames, (j // max(actions_per_frame, 1)) + 1)
-        allowed_tokens = allowed_frames * tokens_per_frame
-        mask[j, :allowed_tokens] = 0.0
-    return mask
-
-
-def _build_causal_cross_mask_tokenwise(num_q: int, num_kv: int, device: torch.device) -> torch.Tensor:
-    mask = torch.full((num_q, num_kv), float("-inf"), device=device)
-    for j in range(num_q):
-        mask[j, : min(j + 1, num_kv)] = 0.0
-    return mask
-
-
-class ActionDiTBlock(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0):
+class ActionTransformerBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, use_state_condition: bool = False):
         super().__init__()
+        self.use_state_condition = bool(use_state_condition)
+
         self.self_norm = nn.LayerNorm(d_model)
         self.self_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
 
-        self.cross_q_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(4)])
-        self.cross_kv_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(4)])
-        self.cross_attns = nn.ModuleList(
-            [nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True) for _ in range(4)]
+        self.video_q_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(3)])
+        self.video_kv_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(3)])
+        self.video_attns = nn.ModuleList(
+            [nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True) for _ in range(3)]
         )
+
+        if self.use_state_condition:
+            self.state_q_norm = nn.LayerNorm(d_model)
+            self.state_kv_norm = nn.LayerNorm(d_model)
+            self.state_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        else:
+            self.state_q_norm = None
+            self.state_kv_norm = None
+            self.state_attn = None
 
         self.ffn_norm = nn.LayerNorm(d_model)
         self.ffn = nn.Sequential(
@@ -78,266 +96,241 @@ class ActionDiTBlock(nn.Module):
             nn.Linear(4 * d_model, d_model),
         )
 
-    def _cross(self, x: torch.Tensor, cond: torch.Tensor, idx: int, attn_mask: torch.Tensor) -> torch.Tensor:
-        q = self.cross_q_norms[idx](x)
-        kv = self.cross_kv_norms[idx](cond)
-        h, _ = self.cross_attns[idx](q, kv, kv, attn_mask=attn_mask, need_weights=False)
+    def _cross(self, x: torch.Tensor, cond: torch.Tensor, q_norm: nn.LayerNorm, kv_norm: nn.LayerNorm, attn: nn.Module, attn_mask: torch.Tensor | None) -> torch.Tensor:
+        q = q_norm(x)
+        kv = kv_norm(cond)
+        h, _ = attn(q, kv, kv, attn_mask=attn_mask, need_weights=False)
         return x + h
 
     def forward(
         self,
         x: torch.Tensor,
-        delta_tokens: torch.Tensor,
-        state_tokens: torch.Tensor,
-        sigma: torch.Tensor,
+        video_tokens: torch.Tensor,
+        state_tokens: torch.Tensor | None,
         self_mask: torch.Tensor,
-        cross_dv_mask: torch.Tensor,
-        cross_state_mask: torch.Tensor,
+        cross_video_mask: torch.Tensor,
+        cross_state_mask: torch.Tensor | None,
     ) -> torch.Tensor:
         if x.ndim != 3:
-            raise ValueError(f"ActionDiTBlock expects x [B,L,D], got {tuple(x.shape)}")
-        if delta_tokens.ndim != 3:
-            raise ValueError(f"ActionDiTBlock expects delta_tokens [B,Lkv,D], got {tuple(delta_tokens.shape)}")
-        if state_tokens.ndim != 3:
-            raise ValueError(f"ActionDiTBlock expects state_tokens [B,Ls,D], got {tuple(state_tokens.shape)}")
-        if sigma.ndim != 3:
-            raise ValueError(f"ActionDiTBlock expects sigma [B,L,1], got {tuple(sigma.shape)}")
+            raise ValueError(f"Expected x [B,L,D], got {tuple(x.shape)}")
+        if video_tokens.ndim != 3:
+            raise ValueError(f"Expected video_tokens [B,Lv,D], got {tuple(video_tokens.shape)}")
+        if self.use_state_condition and (state_tokens is None or state_tokens.ndim != 3):
+            raise ValueError("State conditioning is enabled, but state tokens are missing or invalid.")
 
         h = self.self_norm(x)
         h, _ = self.self_attn(h, h, h, attn_mask=self_mask, need_weights=False)
         x = x + h
 
-        x = self._cross(x, delta_tokens, idx=0, attn_mask=cross_dv_mask)
-        x = self._cross(x, delta_tokens, idx=1, attn_mask=cross_dv_mask)
-        x = self._cross(x, delta_tokens, idx=2, attn_mask=cross_dv_mask)
+        for q_norm, kv_norm, attn in zip(self.video_q_norms, self.video_kv_norms, self.video_attns):
+            x = self._cross(x, video_tokens, q_norm, kv_norm, attn, cross_video_mask)
 
-        h_in = self.cross_q_norms[3](x)
-        kv = self.cross_kv_norms[3](state_tokens)
-        h_state, _ = self.cross_attns[3](h_in, kv, kv, attn_mask=cross_state_mask, need_weights=False)
-        x = x + sigma * h_state
+        if self.use_state_condition:
+            x = self._cross(
+                x,
+                state_tokens,
+                self.state_q_norm,
+                self.state_kv_norm,
+                self.state_attn,
+                cross_state_mask,
+            )
 
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
 
-class ActionMIPHead(nn.Module):
-    """
-    MIP action head aligned with action_expert principle:
-      - 1 causal self-attn
-      - 3 causal delta_v cross-attn
-      - 1 causal state cross-attn with sigma gate
-      - FFN
-    """
-
+@register_action_head("flow_matching")
+class FlowMatchingActionHead(nn.Module):
     def __init__(
         self,
         action_dim: int = 16,
         num_actions: int = 64,
-        d_model: int = 256,
+        d_model: int = 1024,
         n_heads: int = 8,
         n_blocks: int = 8,
-        delta_dim: int = 16,
+        video_hidden_dim: int = 2048,
         state_dim: int = 16,
-        sigma_k: float = 4.0,
         dropout: float = 0.0,
         timestep_buckets: int = 1000,
-        delta_spatial_pool_h: int = 0,
-        delta_spatial_pool_w: int = 0,
-        delta_height: int = 60,
-        delta_width: int = 80,
         actions_per_latent: int = 8,
+        use_state_condition: bool = False,
     ):
         super().__init__()
         self.action_dim = int(action_dim)
         self.num_actions = int(num_actions)
-        self.delta_dim = int(delta_dim)
-        self.sigma_k = float(sigma_k)
+        self.video_hidden_dim = int(video_hidden_dim)
+        self.state_dim = int(state_dim)
         self.timestep_buckets = int(timestep_buckets)
-        self.delta_spatial_pool_h = int(delta_spatial_pool_h)
-        self.delta_spatial_pool_w = int(delta_spatial_pool_w)
-        self.delta_height = int(delta_height)
-        self.delta_width = int(delta_width)
         self.actions_per_latent = int(actions_per_latent)
+        self.use_state_condition = bool(use_state_condition)
 
         self.action_in = nn.Sequential(
             nn.Linear(self.action_dim + 1, d_model),
             nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
-        self.delta_encoder_vec = nn.Sequential(
-            nn.Linear(self.delta_dim, d_model),
+        self.video_in = nn.Sequential(
+            nn.LayerNorm(self.video_hidden_dim),
+            nn.Linear(self.video_hidden_dim, d_model),
             nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
-        flat_h = self.delta_spatial_pool_h if self.delta_spatial_pool_h > 0 else self.delta_height
-        flat_w = self.delta_spatial_pool_w if self.delta_spatial_pool_w > 0 else self.delta_width
-        self.delta_flat_dim = self.delta_dim * flat_h * flat_w
-        self.delta_encoder_flat = nn.Sequential(
-            nn.Linear(self.delta_flat_dim, d_model),
-            nn.SiLU(),
-            nn.Linear(d_model, d_model),
-        )
-        self.state_encoder = nn.Sequential(
-            nn.Linear(state_dim, d_model),
-            nn.SiLU(),
-            nn.Linear(d_model, d_model),
-        )
+        if self.use_state_condition:
+            self.state_in = nn.Sequential(
+                nn.Linear(self.state_dim, d_model),
+                nn.SiLU(),
+                nn.Linear(d_model, d_model),
+            )
+        else:
+            self.state_in = None
         self.timestep_proj = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.SiLU(),
-            nn.Linear(d_model, 1),
+            nn.Linear(d_model, d_model),
         )
         self.pos_embedding = nn.Embedding(self.num_actions, d_model)
-
         self.blocks = nn.ModuleList(
-            [ActionDiTBlock(d_model=d_model, n_heads=n_heads, dropout=dropout) for _ in range(n_blocks)]
+            [
+                ActionTransformerBlock(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    dropout=dropout,
+                    use_state_condition=self.use_state_condition,
+                )
+                for _ in range(n_blocks)
+            ]
         )
-
         self.out_norm = nn.LayerNorm(d_model)
         self.action_out = nn.Linear(d_model, self.action_dim)
+        self._cached_masks: Dict[Tuple[int, int, int, int, str], Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]] = {}
 
-        self._cached_masks: Dict[Tuple[int, int, int, str], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+    def _build_token_timestep(
+        self,
+        timestep: torch.Tensor | None,
+        batch_size: int,
+        seq_len: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if timestep is None:
+            t = torch.zeros(batch_size, device=device, dtype=torch.float32)
+        else:
+            t = timestep.to(device=device, dtype=torch.float32)
+            if t.ndim == 2 and t.shape[1] == 1:
+                t = t[:, 0]
+        t = t.clamp(0.0, 1.0)
+        t_scalar = t.unsqueeze(1).expand(-1, seq_len).unsqueeze(-1)
+        temb = _sinusoidal_timestep_embedding(t * max(float(self.timestep_buckets - 1), 1.0), self.pos_embedding.embedding_dim)
+        temb = self.timestep_proj(temb).unsqueeze(1)
+        return t_scalar, temb
 
-    def _prepare_delta_tokens(self, delta_v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int, int]:
-        # Returns:
-        #   delta_tokens_raw: [B, T, C] or [B, T, C*H*W]
-        #   sigma_source: [B, T, C] for sigma gating
-        #   num_frames: T
-        #   tokens_per_frame: P
-        if delta_v.ndim == 3:
-            bsz, t, c = delta_v.shape
-            if c != self.delta_dim:
-                raise ValueError(f"Expected delta token dim={self.delta_dim}, got {c}")
-            return delta_v, delta_v, t, 1
-        if delta_v.ndim != 5:
-            raise ValueError(f"Unsupported delta_v shape: {tuple(delta_v.shape)}")
-
-        # Flatten per frame: [B, T, C, H, W] -> [B, T, C*H*W]
-        bsz, t, c, h, w = delta_v.shape
-        if c != self.delta_dim:
-            raise ValueError(f"Expected delta token dim={self.delta_dim}, got {c}")
-        x = delta_v
-        if self.delta_spatial_pool_h > 0 and self.delta_spatial_pool_w > 0:
-            x = x.reshape(bsz * t, c, h, w)
-            x = torch.nn.functional.adaptive_avg_pool2d(x, (self.delta_spatial_pool_h, self.delta_spatial_pool_w))
-            x = x.reshape(bsz, t, c, self.delta_spatial_pool_h, self.delta_spatial_pool_w)
-            h, w = self.delta_spatial_pool_h, self.delta_spatial_pool_w
-        sigma_source = x.mean(dim=(-1, -2))  # [B, T, C], only for gating magnitude
-        expected_flat = self.delta_dim * h * w
-        if expected_flat != self.delta_flat_dim:
-            raise ValueError(
-                f"Flattened delta dim mismatch: got C*H*W={expected_flat}, expected configured {self.delta_flat_dim}. "
-                f"Set delta_height/delta_width or pooling config correctly."
-            )
-        delta_tokens_raw = x.reshape(bsz, t, expected_flat).contiguous()
-        return delta_tokens_raw, sigma_source, t, 1
-
-    def _compute_sigma(self, sigma_source: torch.Tensor, num_actions: int) -> torch.Tensor:
-        # delta small -> sigma large; delta large -> sigma small.
-        sigma_t = torch.exp(-self.sigma_k * torch.norm(sigma_source, dim=-1, keepdim=True))  # [B,T,1]
-        t = sigma_t.shape[1]
-        repeat = max(1, self.actions_per_latent)
-        sigma = sigma_t.repeat_interleave(repeat, dim=1)
-        if sigma.shape[1] < num_actions:
-            pad = sigma[:, -1:, :].repeat(1, num_actions - sigma.shape[1], 1)
-            sigma = torch.cat([sigma, pad], dim=1)
-        return sigma[:, :num_actions, :]
+    def _prepare_video_tokens(self, video_tokens: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+        if video_tokens.ndim == 5:
+            bsz, num_frames, h, w, hidden_dim = video_tokens.shape
+            if hidden_dim != self.video_hidden_dim:
+                raise ValueError(
+                    f"Expected video hidden dim {self.video_hidden_dim}, got {hidden_dim}"
+                )
+            return video_tokens.view(bsz, num_frames, h * w, hidden_dim), num_frames, h * w
+        if video_tokens.ndim == 4:
+            bsz, num_frames, tokens_per_frame, hidden_dim = video_tokens.shape
+            if hidden_dim != self.video_hidden_dim:
+                raise ValueError(
+                    f"Expected video hidden dim {self.video_hidden_dim}, got {hidden_dim}"
+                )
+            return video_tokens, num_frames, tokens_per_frame
+        if video_tokens.ndim == 3:
+            bsz, num_video_tokens, hidden_dim = video_tokens.shape
+            if hidden_dim != self.video_hidden_dim:
+                raise ValueError(
+                    f"Expected video hidden dim {self.video_hidden_dim}, got {hidden_dim}"
+                )
+            return video_tokens.view(bsz, num_video_tokens, 1, hidden_dim), num_video_tokens, 1
+        raise ValueError(
+            "Expected video_tokens [B,T,D], [B,T,P,D], or [B,T,H,W,D], "
+            f"got {tuple(video_tokens.shape)}"
+        )
 
     def _get_masks(
         self,
         num_actions: int,
-        num_dv: int,
-        num_state: int,
-        device: torch.device,
         num_frames: int,
         tokens_per_frame: int,
+        num_state_tokens: int,
+        device: torch.device,
     ):
-        key = (num_actions, num_dv, num_state, str(device), num_frames, tokens_per_frame)
+        key = (num_actions, num_frames, tokens_per_frame, num_state_tokens, str(device))
         if key not in self._cached_masks:
-            self_mask = _build_causal_self_mask(num_actions, device)
-            cross_dv_mask = _build_causal_cross_mask_grouped(
-                num_q=num_actions,
-                num_frames=num_frames,
-                tokens_per_frame=tokens_per_frame,
-                actions_per_frame=max(1, self.actions_per_latent),
+            self_mask = _build_block_causal_self_mask(
+                seq_len=num_actions,
+                block_size=self.actions_per_latent,
                 device=device,
             )
-            cross_state_mask = _build_causal_cross_mask_tokenwise(num_actions, num_state, device)
-            self._cached_masks[key] = (self_mask, cross_dv_mask, cross_state_mask)
+            cross_video_mask = None
+            cross_state_mask = None
+            if self.use_state_condition:
+                cross_state_mask = _build_causal_cross_mask(num_actions, num_state_tokens, 1, device)
+            self._cached_masks[key] = (self_mask, cross_video_mask, cross_state_mask)
         return self._cached_masks[key]
-
-    def _build_token_timestep(self, timestep: torch.Tensor | None, batch_size: int, seq_len: int, device: torch.device):
-        if timestep is None:
-            t = torch.zeros(batch_size, device=device)
-        else:
-            t = timestep.to(device=device)
-            if t.ndim == 2 and t.shape[1] == 1:
-                t = t[:, 0]
-        t = t.clamp(min=0).float()
-        # scalar token t in [0,1]
-        t_scalar = (t / max(float(self.timestep_buckets - 1), 1.0)).unsqueeze(1).expand(-1, seq_len).unsqueeze(-1)
-
-        # extra global temb injection to stabilize training
-        t_disc = torch.round(t).long().clamp_(0, self.timestep_buckets - 1)
-        temb = _sinusoidal_timestep_embedding(t_disc, self.pos_embedding.embedding_dim)
-        temb = self.timestep_proj(temb).unsqueeze(1)  # [B,1,1]
-        return t_scalar, temb
 
     def forward(
         self,
         z_action: torch.Tensor,
-        delta_v: torch.Tensor,
-        state_vec: torch.Tensor,
+        video_tokens: torch.Tensor,
+        state_vec: torch.Tensor | None = None,
         timestep: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        bsz, L, c = z_action.shape
-        if c != self.action_dim:
-            raise ValueError(f"Expected z_action last dim={self.action_dim}, got {c}")
-        if L != self.num_actions:
-            raise ValueError(f"Expected num_actions={self.num_actions}, got {L}")
-        if state_vec.ndim != 2:
-            raise ValueError(f"Expected state_vec [B,state_dim], got {tuple(state_vec.shape)}")
+        if z_action.ndim != 3:
+            raise ValueError(f"Expected z_action [B,L,D], got {tuple(z_action.shape)}")
 
-        t_scalar, temb = self._build_token_timestep(timestep, batch_size=bsz, seq_len=L, device=z_action.device)
+        bsz, seq_len, action_dim = z_action.shape
+        if action_dim != self.action_dim:
+            raise ValueError(f"Expected action dim {self.action_dim}, got {action_dim}")
+        if seq_len != self.num_actions:
+            raise ValueError(f"Expected num_actions {self.num_actions}, got {seq_len}")
+        if self.use_state_condition:
+            if state_vec is None or state_vec.ndim != 2:
+                raise ValueError("State conditioning is enabled, but state_vec is missing or invalid.")
+            if state_vec.shape[-1] != self.state_dim:
+                raise ValueError(f"Expected state dim {self.state_dim}, got {state_vec.shape[-1]}")
+
+        t_scalar, temb = self._build_token_timestep(timestep, batch_size=bsz, seq_len=seq_len, device=z_action.device)
 
         x = self.action_in(torch.cat([z_action, t_scalar.to(dtype=z_action.dtype)], dim=-1))
-        pos_ids = torch.arange(L, dtype=torch.long, device=z_action.device)
-        x = x + self.pos_embedding(pos_ids).unsqueeze(0) + temb
+        pos_ids = torch.arange(seq_len, dtype=torch.long, device=z_action.device)
+        x = x + self.pos_embedding(pos_ids).unsqueeze(0) + temb.to(dtype=x.dtype)
 
-        delta_tokens_raw, sigma_source, num_frames, tokens_per_frame = self._prepare_delta_tokens(delta_v)
-        if delta_tokens_raw.ndim != 3:
-            raise ValueError(f"delta_tokens_raw must be [B,Lkv,C], got {tuple(delta_tokens_raw.shape)}")
-        if delta_tokens_raw.shape[-1] == self.delta_dim:
-            delta_tokens = self.delta_encoder_vec(delta_tokens_raw)
-        elif delta_tokens_raw.shape[-1] == self.delta_flat_dim:
-            delta_tokens = self.delta_encoder_flat(delta_tokens_raw)
-        else:
-            raise ValueError(
-                f"Unsupported delta token last dim {delta_tokens_raw.shape[-1]}, "
-                f"expected {self.delta_dim} or {self.delta_flat_dim}"
-            )
-        state_tokens = self.state_encoder(state_vec.unsqueeze(1))
-        sigma = self._compute_sigma(sigma_source, num_actions=L)
+        video_tokens_grouped, num_frames, tokens_per_frame = self._prepare_video_tokens(video_tokens)
+        video_ctx = self.video_in(video_tokens_grouped.to(dtype=x.dtype).view(bsz, num_frames * tokens_per_frame, self.video_hidden_dim))
+        state_tokens = None
+        num_state_tokens = 0
+        if self.use_state_condition:
+            state_tokens = self.state_in(state_vec.unsqueeze(1).to(dtype=x.dtype))
+            num_state_tokens = state_tokens.shape[1]
 
-        self_mask, cross_dv_mask, cross_state_mask = self._get_masks(
-            num_actions=L,
-            num_dv=delta_tokens.shape[1],
-            num_state=state_tokens.shape[1],
-            device=x.device,
+        self_mask, cross_video_mask, cross_state_mask = self._get_masks(
+            num_actions=seq_len,
             num_frames=num_frames,
             tokens_per_frame=tokens_per_frame,
+            num_state_tokens=num_state_tokens,
+            device=x.device,
         )
 
         for block in self.blocks:
             x = block(
                 x,
-                delta_tokens=delta_tokens,
+                video_tokens=video_ctx,
                 state_tokens=state_tokens,
-                sigma=sigma,
                 self_mask=self_mask,
-                cross_dv_mask=cross_dv_mask,
+                cross_video_mask=cross_video_mask,
                 cross_state_mask=cross_state_mask,
             )
 
         x = self.out_norm(x)
         return self.action_out(x)
+
+
+__all__ = [
+    "FlowMatchingActionHead",
+    "build_action_head",
+    "register_action_head",
+]
