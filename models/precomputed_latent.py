@@ -408,9 +408,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         if mode in {"random", "uniform"}:
             return torch.rand(batch_size, device=device, dtype=torch.float32)
         if mode == "beta":
-            sample = self._action_beta_dist.sample([batch_size]).to(device=device, dtype=torch.float32)
-            t_cont = (self.action_head_noise_beta_s - sample) / self.action_head_noise_beta_s
-            return torch.clamp(t_cont, 0.0, 1.0)
+            return self._action_beta_dist.sample([batch_size]).to(device=device, dtype=torch.float32)
         raise ValueError(f"Unsupported action head timestep mode: {self.action_head_timestep_mode}")
 
     def _reshape_last_hidden(self, last_hidden: Tensor, xt_B_C_T_H_W: Tensor) -> Tensor:
@@ -592,7 +590,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
                     f"[action-head] iter={iteration} "
                     f"video_loss={float(loss.detach().item()):.6f} "
                     f"action_loss={float(action_loss.detach().item()):.6f} "
-                    f"action_t={float(action_t.detach().mean().item()):.4f} "
+                    # f"action_t={float(action_t.detach().mean().item()):.4f} "
                     f"total_loss={float(total_loss.detach().item()):.6f}"
                 ),
                 flush=True,

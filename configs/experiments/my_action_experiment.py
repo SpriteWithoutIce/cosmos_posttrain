@@ -25,6 +25,7 @@ from einops import rearrange
 from hydra.core.config_store import ConfigStore
 from megatron.core import parallel_state
 from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data._utils.collate import default_collate
 
 from cosmos_predict2._src.imaginaire.lazy_config import LazyCall as L
 from cosmos_predict2._src.imaginaire.lazy_config import LazyDict
@@ -49,12 +50,13 @@ COSMOS_TOKENIZER = os.environ.get(
 OPEN_LOOP_SAMPLE_EVERY = int(os.environ.get("OPEN_LOOP_SAMPLE_EVERY", "200"))
 OPEN_LOOP_NUM_SAMPLES = int(os.environ.get("OPEN_LOOP_NUM_SAMPLES", "1"))
 OPEN_LOOP_GUIDANCE = float(os.environ.get("OPEN_LOOP_GUIDANCE", "0.0"))
+NPROC = int(os.environ.get("NPROC", "2"))
 VIDEO_ACTION_CONDITIONER_TYPE = os.environ.get("VIDEO_ACTION_CONDITIONER_TYPE", "mlp")
 ACTION_HEAD_ENABLED = int(os.environ.get("ACTION_HEAD_ENABLED", "1"))
 ACTION_HEAD_TYPE = os.environ.get("ACTION_HEAD_TYPE", "flow_matching")
 ACTION_HEAD_LR = float(os.environ.get("ACTION_HEAD_LR", "1e-4"))
 ACTION_HEAD_LOSS_WEIGHT = float(os.environ.get("ACTION_HEAD_LOSS_WEIGHT", "1.0"))
-ACTION_HEAD_TIMESTEP_MODE = os.environ.get("ACTION_HEAD_TIMESTEP_MODE", "uniform")
+ACTION_HEAD_TIMESTEP_MODE = os.environ.get("ACTION_HEAD_TIMESTEP_MODE", "beta")
 ACTION_HEAD_FIXED_TIMESTEP = float(os.environ.get("ACTION_HEAD_FIXED_TIMESTEP", "0.0"))
 ACTION_HEAD_NOISE_BETA_ALPHA = float(os.environ.get("ACTION_HEAD_NOISE_BETA_ALPHA", "1.5"))
 ACTION_HEAD_NOISE_BETA_BETA = float(os.environ.get("ACTION_HEAD_NOISE_BETA_BETA", "1.0"))
@@ -486,6 +488,45 @@ class CompatibleDataLoader(DataLoader):
         super().__init__(*args, **kwargs)
 
 
+def lerobot_latent_collate_fn(batch: list[dict]) -> dict:
+    """
+    Default PyTorch collate fails because precomputed T5 embeddings have variable
+    sequence length. Pad them to the max length in the batch and provide
+    `t5_text_mask` so the model can ignore padded tokens.
+    """
+    collated: dict[str, object] = {}
+    keys = batch[0].keys()
+
+    for key in keys:
+        values = [sample[key] for sample in batch]
+
+        if key == "t5_text_embeddings":
+            max_seq_len = max(int(v.shape[0]) for v in values)
+            hidden_dim = int(values[0].shape[-1])
+            dtype = values[0].dtype
+            padded = values[0].new_zeros((len(values), max_seq_len, hidden_dim), dtype=dtype)
+            mask = torch.zeros((len(values), max_seq_len), dtype=torch.float32)
+            for i, emb in enumerate(values):
+                seq_len = int(emb.shape[0])
+                padded[i, :seq_len] = emb
+                mask[i, :seq_len] = 1.0
+            collated[key] = padded
+            collated["t5_text_mask"] = mask
+            continue
+
+        if key == "ai_caption":
+            collated[key] = values
+            continue
+
+        if values[0] is None:
+            collated[key] = None
+            continue
+
+        collated[key] = default_collate(values)
+
+    return collated
+
+
 # =============================================================================
 # 2. Experiment Config（注册 DataLoader）
 # =============================================================================
@@ -521,7 +562,7 @@ PRECOMPUTED_LATENT_FSDP_RECTIFIED_FLOW_CONFIG = dict(
             use_state_condition=bool(ACTION_HEAD_USE_STATE_CONDITION),
         ),
         config=Video2WorldModelRectifiedFlowConfig(
-            fsdp_shard_size=2,
+            fsdp_shard_size=NPROC,
             state_t=STATE_T,
             text_encoder_config=None,  # 使用预计算 text_emb，不在线加载 reason1
             tokenizer=L(IdentityLatentTokenizer)(
@@ -591,7 +632,7 @@ my_video_experiment = LazyDict(
                 ),
                 heart_beat=dict(save_s3=False),
                 iter_speed=dict(hit_thres=100, save_s3=False),
-                device_monitor=dict(save_s3=False),
+                # device_monitor=dict(save_s3=False),
                 wandb=dict(save_s3=False),
                 wandb_10x=dict(save_s3=False),
                 dataloader_speed=dict(save_s3=False),
@@ -654,19 +695,21 @@ _lerobot_val_dataset = L(MultiLeRobotLatentDataset)(
 lerobot_eef_50_train_dataloader = L(CompatibleDataLoader)(
     dataset=_lerobot_train_dataset,
     sampler=L(_get_sampler)(dataset=_lerobot_train_dataset),
-    batch_size=1,
+    batch_size=4,
     drop_last=True,
     num_workers=0,
     pin_memory=True,
+    collate_fn=lerobot_latent_collate_fn,
 )
 
 lerobot_eef_50_val_dataloader = L(CompatibleDataLoader)(
     dataset=_lerobot_val_dataset,
     sampler=L(_get_sampler)(dataset=_lerobot_val_dataset),
-    batch_size=1,
+    batch_size=4,
     drop_last=True,
     num_workers=0,
     pin_memory=True,
+    collate_fn=lerobot_latent_collate_fn,
 )
 
 

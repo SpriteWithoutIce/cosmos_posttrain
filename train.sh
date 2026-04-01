@@ -27,6 +27,6 @@ torchrun \
   checkpoint.save_iter="${checkpoint_save_iter}" \
   job.wandb_mode="${wandb_mode}" \
   job.name="${run_name}" \
-  > "${log_file}" 2>&1
+  # > "${log_file}" 2>&1
 
 echo "Training started. Log: ${log_file}"

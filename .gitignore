@@ -7,3 +7,4 @@ __pycache__/
 video_generation/
 open_loop/
 .claude/
+action_head_ckpt/

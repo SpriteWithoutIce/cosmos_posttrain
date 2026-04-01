@@ -18,16 +18,16 @@ checkpoint_load_path="${checkpoint_load_path:-/home/jwhe/linyihan/robot_posttrai
 # ---------- runtime ----------
 config="${config:-configs/config.py}"
 experiment_name="${experiment_name:-my_video_experiment}"
-cuda_visible_devices="${cuda_visible_devices:-2,3}"
-nproc="${nproc:-2}"
+cuda_visible_devices="${cuda_visible_devices:-0,1,2,3}"
+nproc="${nproc:-4}"
 master_port="${master_port:-12342}"
-max_iters="${max_iters:-40000}"
-grad_accum_iter="${grad_accum_iter:-8}"
+max_iters="${max_iters:-1000}"
+grad_accum_iter="${grad_accum_iter:-2}"
 logging_iter="${logging_iter:-50}"
-validation_iter="${validation_iter:-5000}"
-checkpoint_save_iter="${checkpoint_save_iter:-10000}"
+validation_iter="${validation_iter:-1000}"
+checkpoint_save_iter="${checkpoint_save_iter:-1000}"
 
-wandb_mode="${wandb_mode:-online}"    # disabled / offline / online
+wandb_mode="${wandb_mode:-disabled}"    # disabled / offline / online
 
 checkpoint_load_training_state="${checkpoint_load_training_state:-False}"
 checkpoint_strict_resume="${checkpoint_strict_resume:-True}"
@@ -36,9 +36,9 @@ checkpoint_strict_resume="${checkpoint_strict_resume:-True}"
 video_action_conditioner_type="${video_action_conditioner_type:-mlp}"
 action_head_enabled="${action_head_enabled:-1}"
 action_head_type="${action_head_type:-flow_matching}"
-action_head_lr="${action_head_lr:-1e-4}"
+action_head_lr="${action_head_lr:-2e-4}"
 action_head_loss_weight="${action_head_loss_weight:-1.0}"
-action_head_timestep_mode="${action_head_timestep_mode:-uniform}"   # uniform / beta / fixed
+action_head_timestep_mode="${action_head_timestep_mode:-beta}"   # uniform / beta / fixed
 action_head_fixed_timestep="${action_head_fixed_timestep:-0.0}"
 action_head_noise_beta_alpha="${action_head_noise_beta_alpha:-1.5}"
 action_head_noise_beta_beta="${action_head_noise_beta_beta:-1.0}"
@@ -56,6 +56,7 @@ action_state_norm_clip="${action_state_norm_clip:-1.0}"
 
 export_train_env() {
   export CUDA_VISIBLE_DEVICES="$cuda_visible_devices"
+  export NPROC="$nproc"
 
   export COSMOS_PREDICT2_ROOT="$cosmos_predict2_root"
   export COSMOS_PT_CKPT="$cosmos_pt_ckpt"
