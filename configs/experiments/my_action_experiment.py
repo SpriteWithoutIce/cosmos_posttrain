@@ -695,7 +695,7 @@ _lerobot_val_dataset = L(MultiLeRobotLatentDataset)(
 lerobot_eef_50_train_dataloader = L(CompatibleDataLoader)(
     dataset=_lerobot_train_dataset,
     sampler=L(_get_sampler)(dataset=_lerobot_train_dataset),
-    batch_size=4,
+    batch_size=8,
     drop_last=True,
     num_workers=0,
     pin_memory=True,
@@ -705,7 +705,7 @@ lerobot_eef_50_train_dataloader = L(CompatibleDataLoader)(
 lerobot_eef_50_val_dataloader = L(CompatibleDataLoader)(
     dataset=_lerobot_val_dataset,
     sampler=L(_get_sampler)(dataset=_lerobot_val_dataset),
-    batch_size=4,
+    batch_size=8,
     drop_last=True,
     num_workers=0,
     pin_memory=True,
