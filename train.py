@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
+from torch.cuda.amp import autocast, GradScaler
 
 from src.cosmost.models import JointVideoActionModel
 from src.cosmost.datasets import LeRobotLatentDataset, collate_fn
@@ -122,6 +123,11 @@ def main():
         num_conditional_frames=config.get("num_cond_frames", 4),
     ).cuda()
     
+    # Use bfloat16 for mixed precision training (saves ~50% memory)
+    use_amp = config.get("use_amp", True)
+    amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    scaler = GradScaler(enabled=use_amp)
+    
     # Wrap with DDP
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
@@ -175,15 +181,18 @@ def main():
                 if torch.is_tensor(data_batch[key]):
                     data_batch[key] = data_batch[key].cuda()
             
-            # Forward
+            # Forward with mixed precision
             model_module = model.module if hasattr(model, "module") else model
-            log_dict, loss = model_module.training_step(data_batch, iteration)
+            with autocast(device_type='cuda', dtype=amp_dtype, enabled=use_amp):
+                log_dict, loss = model_module.training_step(data_batch, iteration)
             
-            # Backward
+            # Backward with gradient scaling
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.get("grad_clip", 1.0))
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             
             # Logging
             if is_main:

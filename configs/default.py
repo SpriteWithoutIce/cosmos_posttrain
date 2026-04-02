@@ -20,7 +20,6 @@ def get_config():
         "num_cond_frames": 4,
         "num_pred_frames": 8,
         "num_actions_per_frame": 8,
-        "time_division_factor": 8,  # 图像降采样后，一个 latent 对应 8 个 action
         "action_dim": 16,
         "normalize_action": True,
         
@@ -32,7 +31,7 @@ def get_config():
             "num_blocks": 28,
             "num_heads": 16,
             "mlp_ratio": 4.0,
-            "crossattn_dim": 100352,  # T5 embedding dim (matching your text embeddings)
+            "crossattn_dim": 1024,  # T5 embedding dim
             "patch_spatial": 2,
             "patch_temporal": 1,
             "max_frames": 128,

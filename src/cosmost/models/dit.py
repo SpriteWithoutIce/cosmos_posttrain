@@ -331,9 +331,6 @@ class VideoDiT(nn.Module):
         t_emb = self.t_embedder(timesteps.squeeze(1))  # [B, D]
         
         # Prepare cross-attention context: [Text, Action]
-        # Ensure crossattn_emb is float (not bfloat16) for projection
-        if crossattn_emb is not None:
-            crossattn_emb = crossattn_emb.float()
         context = self.crossattn_proj(crossattn_emb)  # [B, L, D]
         
         if action is not None:
