@@ -388,7 +388,13 @@ def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
             result["t5_text_mask"] = mask
         elif isinstance(values[0], str):
             result[key] = values
-        else:
+        elif isinstance(values[0], (int, np.integer)):
+            result[key] = torch.tensor(values, dtype=torch.long)
+        elif isinstance(values[0], (float, np.floating)):
+            result[key] = torch.tensor(values, dtype=torch.float32)
+        elif isinstance(values[0], torch.Tensor):
             result[key] = torch.stack(values, dim=0)
+        else:
+            result[key] = values
     
     return result
