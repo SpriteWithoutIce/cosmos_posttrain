@@ -32,7 +32,7 @@ def get_config():
             "num_blocks": 28,
             "num_heads": 16,
             "mlp_ratio": 4.0,
-            "crossattn_dim": 1024,  # T5 embedding dim
+            "crossattn_dim": 100352,  # T5 embedding dim (matching your text embeddings)
             "patch_spatial": 2,
             "patch_temporal": 1,
             "max_frames": 128,
