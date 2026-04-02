@@ -13,11 +13,11 @@ OUTPUT_DIR="${OUTPUT_DIR:-./outputs}"
 RESUME="${RESUME:-}"
 
 # Distributed training settings
-NPROC="${NPROC:-4}"
+NPROC="${NPROC:-1}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 # Environment
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
 echo "=========================================="

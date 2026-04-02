@@ -18,8 +18,8 @@ checkpoint_load_path="${checkpoint_load_path:-/home/jwhe/linyihan/robot_posttrai
 # ---------- runtime ----------
 config="${config:-configs/config.py}"
 experiment_name="${experiment_name:-my_video_experiment}"
-cuda_visible_devices="${cuda_visible_devices:-0,1,2,3}"
-nproc="${nproc:-4}"
+cuda_visible_devices="${cuda_visible_devices:-0}"
+nproc="${nproc:-1}"
 master_port="${master_port:-12342}"
 max_iters="${max_iters:-1000}"
 grad_accum_iter="${grad_accum_iter:-2}"

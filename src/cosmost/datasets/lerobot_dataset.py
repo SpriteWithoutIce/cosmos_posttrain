@@ -70,7 +70,10 @@ class LeRobotLatentDataset(Dataset):
             self.info = {}
         
         # Load episodes
-        self.episodes = []
+        # Each latent file is expected at:
+        #   {latent_root}/{task_name}/traj_{episode:06d}.pt
+        # So we store (task_name, episode_idx, latent_file) triples.
+        self.traj_entries = []
         episodes_dir = self.latent_root
         
         print(f"[Dataset] Looking for latents in: {episodes_dir}")
@@ -79,30 +82,37 @@ class LeRobotLatentDataset(Dataset):
             print(f"[Dataset] WARNING: Latent directory does not exist: {episodes_dir}")
             return
             
-        traj_files = list(episodes_dir.glob("traj_*.pt"))
-        print(f"[Dataset] Found {len(traj_files)} traj files")
+        # Recursively scan to support multi-task latent layouts.
+        traj_files = list(episodes_dir.glob("**/traj_*.pt"))
+        print(f"[Dataset] Found {len(traj_files)} traj files (recursive)")
         
         for traj_file in sorted(traj_files):
             try:
                 episode_idx = int(traj_file.stem.split("_")[1])
-                self.episodes.append(episode_idx)
+                task_name = traj_file.parent.name
+                self.traj_entries.append(
+                    {
+                        "task_name": task_name,
+                        "episode_idx": episode_idx,
+                        "latent_file": traj_file,
+                    }
+                )
             except (ValueError, IndexError) as e:
                 print(f"[Dataset] Warning: Could not parse episode index from {traj_file}: {e}")
                 continue
         
-        print(f"[Dataset] Loaded {len(self.episodes)} episodes")
+        print(f"[Dataset] Loaded {len(self.traj_entries)} latent files")
     
     def _build_sample_index(self):
         """Build index of valid samples."""
         self.samples = []
         
-        print(f"[Dataset] Building sample index for {len(self.episodes)} episodes...")
-        
-        for episode_idx in self.episodes:
-            latent_file = self.latent_root / f"traj_{episode_idx:06d}.pt"
-            if not latent_file.exists():
-                print(f"[Dataset] Warning: Latent file not found: {latent_file}")
-                continue
+        print(f"[Dataset] Building sample index for {len(self.traj_entries)} latent files...")
+
+        for entry in self.traj_entries:
+            episode_idx = entry["episode_idx"]
+            task_name = entry["task_name"]
+            latent_file = entry["latent_file"]
             
             # Load to get number of frames
             try:
@@ -120,7 +130,10 @@ class LeRobotLatentDataset(Dataset):
             
             # Create samples: pred_idx from 1 to n_latents - num_pred_frames
             for pred_idx in range(1, n_latents - self.num_pred_frames + 1):
-                self.samples.append((episode_idx, pred_idx))
+                # Keep task_name to avoid episode_id collisions across different tasks.
+                # Also keep the exact latent file path to avoid filename padding mismatches
+                # (e.g. traj_000.pt vs traj_000000.pt).
+                self.samples.append((task_name, episode_idx, pred_idx, latent_file))
         
         print(f"[Dataset] Total samples: {len(self.samples)}")
         if len(self.samples) == 0:
@@ -164,9 +177,8 @@ class LeRobotLatentDataset(Dataset):
         q99 = q99.to(device=x.device, dtype=x.dtype)
         return 2.0 * (x - q01) / (q99 - q01 + eps) - 1.0
     
-    def _load_latent(self, episode_idx: int) -> Dict[str, torch.Tensor]:
-        """Load latent file for an episode."""
-        latent_file = self.latent_root / f"traj_{episode_idx:06d}.pt"
+    def _load_latent(self, latent_file: Path) -> Dict[str, torch.Tensor]:
+        """Load latent data from a precomputed .pt file."""
         data = torch.load(latent_file, weights_only=False)
         
         latents = data["latent"].float()
@@ -185,12 +197,15 @@ class LeRobotLatentDataset(Dataset):
             "task_text": data.get("task_text", ""),
         }
     
-    def _load_actions(self, episode_idx: int, start_idx: int, end_idx: int) -> torch.Tensor:
+    def _load_actions(self, task_name: str, episode_idx: int, start_idx: int, end_idx: int) -> torch.Tensor:
         """Load actions from parquet."""
         import pandas as pd
         
-        # Find parquet file
-        parquet_files = list(self.lerobot_root.glob(f"**/episode_{episode_idx:06d}.parquet"))
+        # Find parquet file inside corresponding task to avoid episode-id collisions.
+        parquet_files = list((self.lerobot_root / task_name).glob(f"**/episode_{episode_idx:06d}.parquet"))
+        if not parquet_files:
+            # Fallback: older/flat layout.
+            parquet_files = list(self.lerobot_root.glob(f"**/episode_{episode_idx:06d}.parquet"))
         if not parquet_files:
             raise FileNotFoundError(f"No parquet found for episode {episode_idx}")
         
@@ -208,10 +223,10 @@ class LeRobotLatentDataset(Dataset):
         return len(self.samples)
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        episode_idx, pred_idx = self.samples[idx]
+        task_name, episode_idx, pred_idx, latent_file = self.samples[idx]
         
         # Load latent
-        latent_data = self._load_latent(episode_idx)
+        latent_data = self._load_latent(latent_file)
         all_latents = latent_data["latents"]  # [T, C, H, W]
         
         # Extract conditional latents
@@ -239,7 +254,7 @@ class LeRobotLatentDataset(Dataset):
         num_actions = self.num_pred_frames * self.num_actions_per_frame
         action_start = (pred_idx - 1) * 4  # time_division_factor = 4
         action_end = action_start + num_actions
-        actions = self._load_actions(episode_idx, action_start, action_end)
+        actions = self._load_actions(task_name, episode_idx, action_start, action_end)
         
         # Get text embedding
         text_emb = latent_data["text_emb"]
