@@ -27,7 +27,7 @@ logging_iter="${logging_iter:-50}"
 validation_iter="${validation_iter:-1000}"
 checkpoint_save_iter="${checkpoint_save_iter:-1000}"
 
-wandb_mode="${wandb_mode:-online}"    # disabled / offline / online
+wandb_mode="${wandb_mode:-disabled}"    # disabled / offline / online
 
 checkpoint_load_training_state="${checkpoint_load_training_state:-False}"
 checkpoint_strict_resume="${checkpoint_strict_resume:-True}"
