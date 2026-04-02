@@ -72,30 +72,59 @@ class LeRobotLatentDataset(Dataset):
         # Load episodes
         self.episodes = []
         episodes_dir = self.latent_root
-        if episodes_dir.exists():
-            for traj_file in sorted(episodes_dir.glob("traj_*.pt")):
+        
+        print(f"[Dataset] Looking for latents in: {episodes_dir}")
+        
+        if not episodes_dir.exists():
+            print(f"[Dataset] WARNING: Latent directory does not exist: {episodes_dir}")
+            return
+            
+        traj_files = list(episodes_dir.glob("traj_*.pt"))
+        print(f"[Dataset] Found {len(traj_files)} traj files")
+        
+        for traj_file in sorted(traj_files):
+            try:
                 episode_idx = int(traj_file.stem.split("_")[1])
                 self.episodes.append(episode_idx)
+            except (ValueError, IndexError) as e:
+                print(f"[Dataset] Warning: Could not parse episode index from {traj_file}: {e}")
+                continue
+        
+        print(f"[Dataset] Loaded {len(self.episodes)} episodes")
     
     def _build_sample_index(self):
         """Build index of valid samples."""
         self.samples = []
         
+        print(f"[Dataset] Building sample index for {len(self.episodes)} episodes...")
+        
         for episode_idx in self.episodes:
             latent_file = self.latent_root / f"traj_{episode_idx:06d}.pt"
             if not latent_file.exists():
+                print(f"[Dataset] Warning: Latent file not found: {latent_file}")
                 continue
             
             # Load to get number of frames
             try:
                 data = torch.load(latent_file, weights_only=False)
                 n_latents = int(data.get("latent_num_frames", data["latent"].shape[0]))
-            except:
+            except Exception as e:
+                print(f"[Dataset] Warning: Failed to load {latent_file}: {e}")
+                continue
+            
+            # Create samples: need at least num_cond_frames + num_pred_frames
+            min_frames = self.num_cond_frames + self.num_pred_frames
+            if n_latents < min_frames:
+                print(f"[Dataset] Warning: Episode {episode_idx} has only {n_latents} frames, need {min_frames}")
                 continue
             
             # Create samples: pred_idx from 1 to n_latents - num_pred_frames
             for pred_idx in range(1, n_latents - self.num_pred_frames + 1):
                 self.samples.append((episode_idx, pred_idx))
+        
+        print(f"[Dataset] Total samples: {len(self.samples)}")
+        if len(self.samples) == 0:
+            print(f"[Dataset] WARNING: No valid samples found!")
     
     def _load_stats(self, global_stats_json: Optional[str]):
         """Load action normalization statistics."""

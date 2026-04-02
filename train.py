@@ -126,6 +126,13 @@ def main():
     # Dataloader
     train_loader, train_sampler = get_dataloader(config, rank, world_size, "train")
     
+    # Check if dataset is empty
+    if len(train_loader) == 0:
+        raise ValueError("Training dataset is empty! Check your data paths.")
+    
+    if is_main:
+        print(f"Dataset size: {len(train_loader.dataset)}, Batches per epoch: {len(train_loader)}")
+    
     # Logging
     writer = SummaryWriter(output_dir / "logs") if is_main else None
     
@@ -135,10 +142,11 @@ def main():
     max_iterations = config.get("max_iterations", 100000)
     save_every = config.get("save_every", 5000)
     log_every = config.get("log_every", 100)
+    epoch = 0
     
     while iteration < max_iterations:
         if train_sampler is not None:
-            train_sampler.set_epoch(iteration // len(train_loader))
+            train_sampler.set_epoch(epoch)
         
         for batch_idx, data_batch in enumerate(train_loader):
             if iteration >= max_iterations:
@@ -170,6 +178,8 @@ def main():
                     model_module.save_checkpoint(save_path, optimizer, iteration)
             
             iteration += 1
+        
+        epoch += 1
     
     if is_main:
         writer.close()
