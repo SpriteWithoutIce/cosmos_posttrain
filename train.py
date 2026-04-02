@@ -44,6 +44,7 @@ def get_dataloader(config, rank, world_size, split="train"):
         num_cond_frames=config.get("num_cond_frames", 4),
         num_pred_frames=config.get("num_pred_frames", 8),
         num_actions_per_frame=config.get("num_actions_per_frame", 8),
+        time_division_factor=config.get("time_division_factor", 4),
         action_dim=config.get("action_dim", 16),
         data_split=split,
         normalize_action=config.get("normalize_action", True),

@@ -36,6 +36,7 @@ class LeRobotLatentDataset(Dataset):
         num_cond_frames: int = 4,
         num_pred_frames: int = 8,
         num_actions_per_frame: int = 8,
+        time_division_factor: int = 4,
         action_dim: int = 16,
         data_split: str = "train",
         normalize_action: bool = True,
@@ -46,6 +47,7 @@ class LeRobotLatentDataset(Dataset):
         self.num_cond_frames = num_cond_frames
         self.num_pred_frames = num_pred_frames
         self.num_actions_per_frame = num_actions_per_frame
+        self.time_division_factor = time_division_factor
         self.action_dim = action_dim
         self.data_split = data_split
         self.normalize_action = normalize_action
@@ -126,7 +128,26 @@ class LeRobotLatentDataset(Dataset):
             # Load to get number of frames
             try:
                 data = torch.load(latent_file, weights_only=False)
-                n_latents = int(data.get("latent_num_frames", data["latent"].shape[0]))
+                latents = data["latent"]
+                
+                # Determine T (temporal dim) based on shape
+                # latents can be [T, C, H, W] or [C, T, H, W]
+                # C (channel) is typically 16 for video latents
+                if latents.ndim != 4:
+                    print(f"[Dataset] Warning: Expected 4D latent in {latent_file}, got {latents.ndim}D")
+                    continue
+                
+                # Check if first or second dim is the channel (16)
+                if latents.shape[1] == 16:
+                    # [T, C, H, W] format
+                    n_latents = latents.shape[0]
+                elif latents.shape[0] == 16:
+                    # [C, T, H, W] format
+                    n_latents = latents.shape[1]
+                else:
+                    # Ambiguous, try latent_num_frames or default to shape[0]
+                    n_latents = int(data.get("latent_num_frames", latents.shape[0]))
+                    
             except Exception as e:
                 print(f"[Dataset] Warning: Failed to load {latent_file}: {e}")
                 continue
@@ -193,12 +214,50 @@ class LeRobotLatentDataset(Dataset):
         latents = data["latent"].float()
         
         # Ensure shape is [T, C, H, W]
-        if latents.ndim == 4 and latents.shape[0] != latents.shape[1]:
-            # Already [T, C, H, W]
-            pass
-        elif latents.ndim == 4 and latents.shape[1] == self.action_dim:
-            # [C, T, H, W] -> [T, C, H, W]
-            latents = latents.permute(1, 0, 2, 3)
+        # latents can be [T, C, H, W] or [C, T, H, W]
+        if latents.ndim != 4:
+            raise ValueError(f"Expected 4D latent, got {latents.ndim}D with shape {latents.shape}")
+        
+        # Check latent_num_frames metadata first (most reliable)
+        if "latent_num_frames" in data:
+            n_frames = int(data["latent_num_frames"])
+            # Determine which dim matches n_frames
+            if latents.shape[0] == n_frames:
+                # [T, C, H, W] format
+                pass
+            elif latents.shape[1] == n_frames:
+                # [C, T, H, W] format
+                latents = latents.permute(1, 0, 2, 3)
+            else:
+                # Neither dim matches, print warning
+                print(f"[Warning] latent_num_frames={n_frames} but shape is {latents.shape}")
+                # Assume [T, C, H, W] if shape[0] > shape[1], otherwise transpose
+                if latents.shape[0] < latents.shape[1]:
+                    latents = latents.permute(1, 0, 2, 3)
+        else:
+            # Heuristic: T is usually larger than C (16)
+            # Also H and W are usually larger (e.g., 60, 80)
+            # So [T, C, H, W] would have shape like [12, 16, 60, 80]
+            # and [C, T, H, W] would have shape like [16, 12, 60, 80]
+            
+            # Find which dim is 16 (channel)
+            if latents.shape[0] == 16:
+                # First dim is 16 -> [C, T, H, W]
+                latents = latents.permute(1, 0, 2, 3)
+            elif latents.shape[1] == 16:
+                # Second dim is 16 -> [T, C, H, W]
+                pass
+            else:
+                # Neither is 16, try other heuristics
+                # Usually T >= 12 and C = 16, H, W are spatial (often larger)
+                # If shape[0] < 20, it's likely C
+                if latents.shape[0] <= 20:
+                    latents = latents.permute(1, 0, 2, 3)
+                # Otherwise assume [T, C, H, W]
+        
+        # Verify: after transformation, shape[1] should be 16
+        if latents.shape[1] != 16:
+            print(f"[Warning] After loading {latent_file}, expected channel=16, got shape {latents.shape}")
         
         return {
             "latents": latents,
@@ -237,8 +296,17 @@ class LeRobotLatentDataset(Dataset):
         # Load latent
         latent_data = self._load_latent(latent_file)
         all_latents = latent_data["latents"]  # [T, C, H, W]
+        n_latents = all_latents.shape[0]
         
-        # Extract conditional latents
+        # Ensure we have enough frames
+        total_frames_needed = self.num_cond_frames + self.num_pred_frames
+        if pred_idx + self.num_pred_frames > n_latents:
+            raise ValueError(
+                f"Not enough frames for episode {episode_idx}, pred_idx {pred_idx}: "
+                f"have {n_latents}, need {pred_idx + self.num_pred_frames}"
+            )
+        
+        # Extract conditional latents (always 4 frames)
         if pred_idx >= self.num_cond_frames:
             cond_latents = all_latents[pred_idx - self.num_cond_frames:pred_idx]
         else:
@@ -250,18 +318,33 @@ class LeRobotLatentDataset(Dataset):
             else:
                 cond_latents = all_latents[0:1].repeat(self.num_cond_frames, 1, 1, 1)
         
-        # Extract prediction latents
+        # Ensure cond_latents is exactly num_cond_frames
+        if cond_latents.shape[0] != self.num_cond_frames:
+            raise ValueError(
+                f"Wrong cond_frames shape: {cond_latents.shape}, expected {self.num_cond_frames} frames"
+            )
+        
+        # Extract prediction latents (always 8 frames)
         pred_latents = all_latents[pred_idx:pred_idx + self.num_pred_frames]
         
-        # Combine: [num_cond + num_pred, C, H, W]
+        if pred_latents.shape[0] != self.num_pred_frames:
+            raise ValueError(
+                f"Wrong pred_frames shape: {pred_latents.shape}, expected {self.num_pred_frames} frames"
+            )
+        
+        # Combine: [num_cond + num_pred, C, H, W] = [12, 16, H, W]
         video = torch.cat([cond_latents, pred_latents], dim=0)
         
-        # Rearrange to [C, T, H, W]
+        # Verify shape
+        assert video.shape[0] == total_frames_needed, \
+            f"Video has {video.shape[0]} frames, expected {total_frames_needed}"
+        
+        # Rearrange to [C, T, H, W] = [16, 12, H, W]
         video = video.permute(1, 0, 2, 3).contiguous()
         
         # Load actions
         num_actions = self.num_pred_frames * self.num_actions_per_frame
-        action_start = (pred_idx - 1) * 4  # time_division_factor = 4
+        action_start = (pred_idx - 1) * self.time_division_factor
         action_end = action_start + num_actions
         actions = self._load_actions(task_name, episode_idx, action_start, action_end)
         

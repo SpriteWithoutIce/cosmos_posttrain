@@ -20,6 +20,7 @@ def get_config():
         "num_cond_frames": 4,
         "num_pred_frames": 8,
         "num_actions_per_frame": 8,
+        "time_division_factor": 8,  # 图像降采样后，一个 latent 对应 8 个 action
         "action_dim": 16,
         "normalize_action": True,
         
