@@ -74,13 +74,22 @@ class LeRobotLatentDataset(Dataset):
         episodes_dir = self.latent_root
         
         print(f"[Dataset] Looking for latents in: {episodes_dir}")
+        print(f"[Dataset] Absolute path: {episodes_dir.absolute()}")
         
         if not episodes_dir.exists():
             print(f"[Dataset] WARNING: Latent directory does not exist: {episodes_dir}")
+            print(f"[Dataset] Current working directory: {os.getcwd()}")
+            print(f"[Dataset] Parent exists: {episodes_dir.parent.exists()}")
+            if episodes_dir.parent.exists():
+                print(f"[Dataset] Parent contents: {list(episodes_dir.parent.iterdir())}")
             return
             
         traj_files = list(episodes_dir.glob("traj_*.pt"))
         print(f"[Dataset] Found {len(traj_files)} traj files")
+        
+        # Show first few files
+        if traj_files:
+            print(f"[Dataset] First 5 files: {[f.name for f in traj_files[:5]]}")
         
         for traj_file in sorted(traj_files):
             try:
@@ -90,7 +99,7 @@ class LeRobotLatentDataset(Dataset):
                 print(f"[Dataset] Warning: Could not parse episode index from {traj_file}: {e}")
                 continue
         
-        print(f"[Dataset] Loaded {len(self.episodes)} episodes")
+        print(f"[Dataset] Loaded {len(self.episodes)} episodes: {self.episodes[:10]}...")
     
     def _build_sample_index(self):
         """Build index of valid samples."""
@@ -101,8 +110,18 @@ class LeRobotLatentDataset(Dataset):
         for episode_idx in self.episodes:
             latent_file = self.latent_root / f"traj_{episode_idx:06d}.pt"
             if not latent_file.exists():
-                print(f"[Dataset] Warning: Latent file not found: {latent_file}")
-                continue
+                # Try without leading zeros
+                latent_file_alt = self.latent_root / f"traj_{episode_idx}.pt"
+                if latent_file_alt.exists():
+                    latent_file = latent_file_alt
+                else:
+                    # Try with 3 digits
+                    latent_file_alt2 = self.latent_root / f"traj_{episode_idx:03d}.pt"
+                    if latent_file_alt2.exists():
+                        latent_file = latent_file_alt2
+                    else:
+                        print(f"[Dataset] Warning: Latent file not found: {latent_file}")
+                        continue
             
             # Load to get number of frames
             try:

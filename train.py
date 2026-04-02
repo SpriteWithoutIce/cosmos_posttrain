@@ -52,15 +52,22 @@ def get_dataloader(config, rank, world_size, split="train"):
     
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=(split=="train")) if world_size > 1 else None
     
+    batch_size = config.get("batch_size", 4)
+    
+    # Check if dataset is smaller than batch_size
+    if len(dataset) < batch_size * world_size:
+        print(f"[Warning] Dataset size ({len(dataset)}) is smaller than batch_size ({batch_size}) * world_size ({world_size})")
+        print(f"[Warning] Consider reducing batch_size")
+    
     dataloader = DataLoader(
         dataset,
-        batch_size=config["batch_size"],
+        batch_size=batch_size,
         sampler=sampler,
         shuffle=(sampler is None and split=="train"),
         num_workers=config.get("num_workers", 4),
         pin_memory=True,
         collate_fn=collate_fn,
-        drop_last=True,
+        drop_last=False,  # Changed to False to avoid empty dataloader
     )
     
     return dataloader, sampler
@@ -83,6 +90,16 @@ def main():
         config = config_module.get_config()
     else:
         raise ValueError(f"Unsupported config format: {config_path.suffix}")
+    
+    # Print config for debugging
+    if "RANK" not in os.environ or int(os.environ["RANK"]) == 0:
+        print("=" * 50)
+        print("Configuration:")
+        print(f"  Lerobot root: {config.get('lerobot_root')}")
+        print(f"  Latent root: {config.get('latent_root')}")
+        print(f"  Batch size: {config.get('batch_size')}")
+        print(f"  Num workers: {config.get('num_workers')}")
+        print("=" * 50)
     
     # Setup distributed
     rank, world_size, local_rank = setup_distributed()
