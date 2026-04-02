@@ -56,7 +56,7 @@ def get_config():
         "action_stop_gradient": False,  # Must be False for joint training
         
         # Training
-        "batch_size": 4,
+        "batch_size": 1,
         "learning_rate": 2e-5,
         "weight_decay": 0.01,
         "grad_clip": 1.0,

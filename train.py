@@ -53,7 +53,7 @@ def get_dataloader(config, rank, world_size, split="train"):
     
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=(split=="train")) if world_size > 1 else None
     
-    batch_size = config.get("batch_size", 4)
+    batch_size = config.get("batch_size", 1)
     
     # Check if dataset is smaller than batch_size
     if len(dataset) < batch_size * world_size:
