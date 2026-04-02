@@ -74,6 +74,7 @@ class ActionTimestepConditionedDiT(MiniTrainDIT):
         with amp.autocast("cuda", enabled=self.use_wan_fp32_strategy, dtype=torch.float32):
             if timesteps_B_T.ndim == 1:
                 timesteps_B_T = timesteps_B_T.unsqueeze(1)
+            timesteps_B_T = timesteps_B_T.to(dtype=torch.float32)
             timesteps_B_T = timesteps_B_T * self.timestep_scale
             t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder(timesteps_B_T)
             if self.video_action_conditioner is not None and action is not None:
@@ -268,7 +269,8 @@ class AsymmetricConditionBlock(Block):
 class AsymmetricConditionDiT(MiniTrainDIT):
     supports_action_conditioning: bool = False
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, timestep_scale: float = 1.0, **kwargs):
+        del timestep_scale
         backend = kwargs.get("atten_backend", "torch")
         crossattn_emb_channels = int(kwargs.get("crossattn_emb_channels", 1024))
         use_wan_fp32_strategy = bool(kwargs.get("use_wan_fp32_strategy", False))
@@ -346,6 +348,7 @@ class AsymmetricConditionDiT(MiniTrainDIT):
         with amp.autocast("cuda", enabled=self.use_wan_fp32_strategy, dtype=torch.float32):
             if timesteps_B_T.ndim == 1:
                 timesteps_B_T = timesteps_B_T.unsqueeze(1)
+            timesteps_B_T = timesteps_B_T.to(dtype=torch.float32)
             t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder(timesteps_B_T)
             t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
 

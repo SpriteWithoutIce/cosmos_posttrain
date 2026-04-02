@@ -456,6 +456,7 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         extracted_layers: list[Tensor] = []
         for layer_hidden in hidden_layers:
             hidden_grid = self._reshape_last_hidden(layer_hidden, xt_B_C_T_H_W)
+            # Only use conditional frames (clean, no noise) to avoid train/test mismatch
             extracted_layers.append(hidden_grid[:, :num_cond].contiguous())
         return extracted_layers
 
@@ -546,101 +547,141 @@ class PrecomputedLatentVideo2WorldModel(Video2WorldModelRectifiedFlow):
         return output_batch, loss, last_hidden, xt_B_C_T_H_W
 
     def training_step(self, data_batch: dict, iteration: int = 0):
-        output_batch, loss, last_hidden, xt_B_C_T_H_W = self._forward_video_training(data_batch)
+        """
+        Joint training: Video and Action are generated simultaneously.
+        - Video uses GT action as condition (via timestep embedding)
+        - Action uses Video conditional frames as condition
+        - Both losses are optimized together
+        """
         if not self.action_head_enabled or self.action_head is None:
+            # Fallback to original video-only training
+            output_batch, loss, _, _ = self._forward_video_training(data_batch)
             return output_batch, loss
 
-        actions = data_batch.get("actions", None)
-        if actions is None:
+        # 1. Get GT video and GT action
+        actions_gt = data_batch.get("actions", None)
+        if actions_gt is None:
             raise KeyError("Action head enabled, but batch is missing 'actions'.")
-        if not torch.is_tensor(actions) or actions.ndim != 3:
-            raise ValueError(f"Invalid action shape: {None if actions is None else tuple(actions.shape)}")
-        actions = actions.to(loss.device).float()
+        if not torch.is_tensor(actions_gt) or actions_gt.ndim != 3:
+            raise ValueError(f"Invalid action shape: {tuple(actions_gt.shape) if torch.is_tensor(actions_gt) else None}")
+        
+        # 2. Prepare video data
+        if self.text_encoder is not None and self.config.text_encoder_config.compute_online:
+            text_embeddings = self.text_encoder.compute_text_embeddings_online(data_batch, self.input_caption_key)
+            data_batch["t5_text_embeddings"] = text_embeddings
+            data_batch["t5_text_mask"] = torch.ones(text_embeddings.shape[0], text_embeddings.shape[1], device="cuda")
 
-        states = data_batch.get("states", None)
-        if states is not None:
-            if not torch.is_tensor(states) or states.ndim != 2:
-                raise ValueError(f"Invalid state shape: {tuple(states.shape)}")
-            states = states.to(loss.device).float()
-
-        if last_hidden is None:
-            raise RuntimeError("Action head requires the last hidden state from the video network, but none was returned.")
-
-        num_cond = int(getattr(self.config, "min_num_conditional_frames", 4))
-        num_pred = max(1, actions.shape[1] // max(1, int(getattr(self.action_head, "actions_per_latent", 8))))
-        if getattr(self.action_head, "requires_video_hidden_layers", False):
-            video_tokens = self._extract_action_head_video_hidden_layers(last_hidden, xt_B_C_T_H_W, num_cond=num_cond)
-            if self.action_head_stop_gradient:
-                video_tokens = [layer.detach() for layer in video_tokens]
-        else:
-            video_tokens = self._extract_action_head_video_tokens(last_hidden, xt_B_C_T_H_W, num_cond=num_cond, num_pred=num_pred)
-            if self.action_head_stop_gradient:
-                video_tokens = video_tokens.detach()
-
-        if self._action_head_debug and (not self._action_head_debug_printed) and self._is_rank0():
-            print(
-                "[action-head][debug]",
-                (
-                    f"actions={tuple(actions.shape)} "
-                    f"video_tokens={tuple(video_tokens.shape)}"
-                    if torch.is_tensor(video_tokens)
-                    else f"video_layers={len(video_tokens)} first_layer={tuple(video_tokens[0].shape)}"
-                ),
-                flush=True,
-            )
-            self._action_head_debug_printed = True
-
-        action_t = self._sample_action_head_timestep(batch_size=actions.shape[0], device=actions.device)
-        noise = torch.randn_like(actions)
-        interp = action_t.view(-1, 1, 1)
-        z_t = (1.0 - interp) * noise + interp * actions
-        target_velocity = actions - noise
-
-        pred_velocity = self.action_head(
-            z_t,
-            video_tokens,
-            state_vec=states if getattr(self.action_head, "use_state_condition", False) else None,
-            timestep=action_t,
+        _, x0_video, condition = self.get_data_and_condition(data_batch)
+        epsilon_video = torch.randn(x0_video.size(), **self.tensor_kwargs_fp32)
+        batch_size = x0_video.size()[0]
+        
+        # 3. Sample timesteps for video and action (independent)
+        t_video = self.rectified_flow.sample_train_time(batch_size).to(**self.tensor_kwargs_fp32)
+        t_video = rearrange(t_video, "b -> b 1")
+        t_action = self._sample_action_head_timestep(batch_size=batch_size, device=x0_video.device)
+        
+        # 4. Broadcast for model parallelism
+        x0_video, condition, epsilon_video, t_video = self.broadcast_split_for_model_parallelsim(
+            x0_video, condition, epsilon_video, t_video
         )
-
-        action_loss = F.mse_loss(pred_velocity, target_velocity)
-        total_loss = loss + self.action_loss_weight * action_loss
-
-        output_batch["action_loss"] = action_loss.detach()
-        output_batch["video_loss"] = loss.detach()
-        output_batch["total_loss"] = total_loss.detach()
-        output_batch["metrics/action_loss"] = output_batch["action_loss"]
-        output_batch["metrics/video_loss"] = output_batch["video_loss"]
-        output_batch["metrics/total_loss"] = output_batch["total_loss"]
-        output_batch["metrics/action_timestep_mean"] = action_t.detach().mean()
-
+        timesteps_video = self.rectified_flow.get_discrete_timestamp(t_video, self.tensor_kwargs_fp32)
+        
+        # 5. Prepare noisy video and action
+        sigmas_video = self.rectified_flow.get_sigmas(timesteps_video, self.tensor_kwargs_fp32)
+        timesteps_video = rearrange(timesteps_video, "b -> b 1")
+        sigmas_video = rearrange(sigmas_video, "b -> b 1")
+        xt_video, vt_video = self.rectified_flow.get_interpolation(epsilon_video, x0_video, sigmas_video)
+        
+        # Action: flow matching setup
+        actions_gt = actions_gt.to(xt_video.device).float()
+        noise_action = torch.randn_like(actions_gt)
+        interp_action = t_action.view(-1, 1, 1)
+        xt_action = (1.0 - interp_action) * noise_action + interp_action * actions_gt
+        target_velocity_action = actions_gt - noise_action
+        
+        # 6. Video forward with GT action as condition
+        actions_gt_for_video = actions_gt if not self.action_head_stop_gradient else actions_gt.detach()
+        vt_pred_video, video_hidden = self.denoise(
+            noise=epsilon_video,
+            xt_B_C_T_H_W=xt_video.to(**self.tensor_kwargs),
+            timesteps_B_T=timesteps_video,
+            condition=condition,
+            action=actions_gt_for_video,  # GT action conditions video
+            collect_last_hidden=True,
+        )
+        
+        # 7. Compute video loss
+        time_weights_video = self.rectified_flow.train_time_weight(timesteps_video, self.tensor_kwargs_fp32)
+        per_instance_video_loss = torch.mean(
+            (vt_pred_video - vt_video) ** 2, dim=list(range(1, vt_pred_video.dim()))
+        )
+        loss_video = torch.mean(time_weights_video * per_instance_video_loss)
+        
+        # 8. Action forward with video conditional frames
+        num_cond = int(getattr(self.config, "min_num_conditional_frames", 4))
+        if getattr(self.action_head, "requires_video_hidden_layers", False):
+            video_tokens = self._extract_action_head_video_hidden_layers(video_hidden, xt_video, num_cond=num_cond)
+        else:
+            num_pred = max(1, actions_gt.shape[1] // max(1, int(getattr(self.action_head, "actions_per_latent", 8))))
+            video_tokens = self._extract_action_head_video_tokens(video_hidden, xt_video, num_cond=num_cond, num_pred=num_pred)
+        
+        # 9. Action head forward
+        pred_velocity_action = self.action_head(
+            xt_action,
+            video_tokens,
+            state_vec=None,
+            timestep=t_action,
+        )
+        
+        # 10. Compute action loss
+        loss_action = F.mse_loss(pred_velocity_action, target_velocity_action)
+        
+        # 11. Total loss (joint optimization)
+        total_loss = loss_video + self.action_loss_weight * loss_action
+        
+        # 12. Prepare output
+        output_batch = {
+            "x0": x0_video,
+            "xt": xt_video,
+            "sigma": sigmas_video,
+            "condition": condition,
+            "model_pred": vt_pred_video,
+            "video_loss": loss_video.detach(),
+            "action_loss": loss_action.detach(),
+            "total_loss": total_loss.detach(),
+            "timesteps": timesteps_video,
+            "per_instance_loss": per_instance_video_loss,
+            "n_cond_frames": condition.num_conditional_frames_B,
+            "metrics/video_loss": loss_video.detach(),
+            "metrics/action_loss": loss_action.detach(),
+            "metrics/total_loss": total_loss.detach(),
+            "metrics/action_timestep_mean": t_action.detach().mean(),
+        }
+        
+        # 13. Logging
         if self._is_rank0() and self._action_head_log_every > 0 and iteration % self._action_head_log_every == 0:
             print(
-                (
-                    f"[action-head] iter={iteration} "
-                    f"video_loss={float(loss.detach().item()):.6f} "
-                    f"action_loss={float(action_loss.detach().item()):.6f} "
-                    # f"action_t={float(action_t.detach().mean().item()):.4f} "
-                    f"total_loss={float(total_loss.detach().item()):.6f}"
-                ),
+                f"[joint] iter={iteration} "
+                f"video_loss={float(loss_video.detach().item()):.6f} "
+                f"action_loss={float(loss_action.detach().item()):.6f} "
+                f"total_loss={float(total_loss.detach().item()):.6f}",
                 flush=True,
             )
             if self._action_head_wandb_log:
                 try:
-                    import wandb  # type: ignore
-
+                    import wandb
                     if wandb.run is not None:
                         wandb.log(
                             {
-                                "train/video_loss": float(loss.detach().item()),
-                                "train/action_loss": float(action_loss.detach().item()),
-                                "train/action_timestep_mean": float(action_t.detach().mean().item()),
+                                "train/video_loss": float(loss_video.detach().item()),
+                                "train/action_loss": float(loss_action.detach().item()),
+                                "train/action_timestep_mean": float(t_action.detach().mean().item()),
                                 "train/total_loss": float(total_loss.detach().item()),
                             },
                             step=int(iteration),
                         )
                 except Exception:
                     pass
-
+        
         self._maybe_save_action_head(iteration=iteration)
         return output_batch, total_loss

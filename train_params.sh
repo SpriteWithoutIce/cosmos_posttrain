@@ -27,7 +27,7 @@ logging_iter="${logging_iter:-50}"
 validation_iter="${validation_iter:-1000}"
 checkpoint_save_iter="${checkpoint_save_iter:-1000}"
 
-wandb_mode="${wandb_mode:-disabled}"    # disabled / offline / online
+wandb_mode="${wandb_mode:-online}"    # disabled / offline / online
 
 checkpoint_load_training_state="${checkpoint_load_training_state:-False}"
 checkpoint_strict_resume="${checkpoint_strict_resume:-True}"
@@ -36,7 +36,7 @@ checkpoint_strict_resume="${checkpoint_strict_resume:-True}"
 video_action_conditioner_type="${video_action_conditioner_type:-mlp}"
 action_head_enabled="${action_head_enabled:-1}"
 action_head_type="${action_head_type:-flow_matching}"
-action_head_lr="${action_head_lr:-2e-4}"
+action_head_lr="${action_head_lr:-5e-4}"
 action_head_loss_weight="${action_head_loss_weight:-1.0}"
 action_head_timestep_mode="${action_head_timestep_mode:-beta}"   # uniform / beta / fixed
 action_head_fixed_timestep="${action_head_fixed_timestep:-0.0}"
@@ -45,7 +45,7 @@ action_head_noise_beta_beta="${action_head_noise_beta_beta:-1.0}"
 action_head_noise_beta_s="${action_head_noise_beta_s:-0.999}"
 action_head_actions_per_latent="${action_head_actions_per_latent:-8}"
 action_head_use_state_condition="${action_head_use_state_condition:-0}"
-action_head_stop_gradient="${action_head_stop_gradient:-1}"
+action_head_stop_gradient="${action_head_stop_gradient:-0}"
 action_head_video_hidden_pred_only="${action_head_video_hidden_pred_only:-0}"
 action_head_save_every="${action_head_save_every:-500}"
 action_head_load_path="${action_head_load_path:-}"
